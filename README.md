@@ -288,7 +288,7 @@ Abre `https://tusubdominio.tudominio.com` en el navegador. La app debería carga
 
 ### 1. Error: `Cannot find module @rollup/rollup-darwin-arm64`
 
-**Causa:** el `pnpm-workspace.yaml` excluye los binarios nativos de macOS porque fue generado en Replit (Linux x64).
+**Causa:** el `pnpm-workspace.yaml` excluye los binarios nativos de macOS porque fue generado en Linux x64.
 
 **Solución:** eliminar las líneas con `darwin` del bloque `overrides` en `pnpm-workspace.yaml`, borrar `node_modules` y `pnpm-lock.yaml`, y reinstalar.
 
