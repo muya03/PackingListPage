@@ -127,7 +127,7 @@ cd PackingListPage
 
 ### 2. Eliminar binarios de plataforma bloqueados (solo la primera vez)
 
-El `pnpm-workspace.yaml` original fue generado en un entorno Replit (Linux x64) e incluye overrides que excluyen los binarios nativos de macOS (`darwin-arm64`, `darwin-x64`) y otros sistemas. Si trabajas en **Mac con Apple Silicon (M1/M2/M3/M4)**, debes eliminar esas líneas del bloque `overrides` en `pnpm-workspace.yaml` antes de instalar:
+El `pnpm-workspace.yaml` original fue generado en un entorno Linux x64 e incluye overrides que excluyen los binarios nativos de macOS (`darwin-arm64`, `darwin-x64`) y otros sistemas. Si trabajas en **Mac con Apple Silicon (M1/M2/M3/M4)**, debes eliminar esas líneas del bloque `overrides` en `pnpm-workspace.yaml` antes de instalar:
 
 Líneas a eliminar (todas las que contengan `darwin`):
 ```yaml
