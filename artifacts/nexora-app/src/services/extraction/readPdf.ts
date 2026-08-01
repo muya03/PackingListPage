@@ -8,7 +8,10 @@
  */
 
 import * as pdfjs from "pdfjs-dist";
-import type { TextItem as PdfjsTextItem } from "pdfjs-dist/types/src/display/api";
+import type {
+  PDFPageProxy,
+  TextItem as PdfjsTextItem,
+} from "pdfjs-dist/types/src/display/api";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { groupIntoLines } from "./lines";
 import type { DocumentText, PageText, SourceDocument, TextItem } from "./types";
@@ -30,11 +33,10 @@ export async function readPdf(source: SourceDocument): Promise<DocumentText> {
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
       const page = await doc.getPage(pageNumber);
       const viewport = page.getViewport({ scale: 1 });
-      const content = await page.getTextContent();
+      const textItems = await readTextItems(page);
 
       const items: TextItem[] = [];
-      for (const raw of content.items) {
-        const item = raw as PdfjsTextItem;
+      for (const item of textItems) {
         if (typeof item.str !== "string" || !item.str.trim()) continue;
         const [, , , , e, f] = item.transform;
         const height = Math.abs(item.height) || 8;
@@ -76,4 +78,33 @@ export async function readPdf(source: SourceDocument): Promise<DocumentText> {
     nativeTables: [],
     isScanned: avgCharsPerPage < SCAN_CHAR_THRESHOLD,
   };
+}
+
+/**
+ * Reads a page's text runs by pulling the stream with an explicit reader.
+ *
+ * pdf.js also offers `getTextContent()`, but it is implemented with
+ * `for await (… of readableStream)` and Safari does not implement async
+ * iteration over a ReadableStream — the call fails there with "undefined is
+ * not a function (near '...value of readableStream...')". Reading the same
+ * stream through `getReader()` behaves identically and works in every browser.
+ */
+async function readTextItems(page: PDFPageProxy): Promise<PdfjsTextItem[]> {
+  const reader = page.streamTextContent().getReader() as ReadableStreamDefaultReader<{
+    items?: unknown[];
+  }>;
+
+  const items: PdfjsTextItem[] = [];
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      for (const item of value?.items ?? []) {
+        items.push(item as PdfjsTextItem);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return items;
 }

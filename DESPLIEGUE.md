@@ -34,6 +34,8 @@ Esto significa que cualquier hosting que sirva archivos estáticos vale: Hosting
 
 El `api-server` con PostgreSQL es **opcional** y solo añade la función de guardar y recuperar sesiones con nombre.
 
+**Navegadores:** Safari, Chrome, Firefox y Edge en sus versiones actuales. Toda la lectura de documentos y la generación del PDF ocurren en el navegador, así que conviene probar el despliegue en el navegador que se vaya a usar en la oficina.
+
 ---
 
 ## 1. Preparar el Mac
@@ -340,6 +342,14 @@ Es un error de versiones antiguas. En la versión actual `PORT` y `BASE_PATH` so
 ### La app carga pero no extrae nada de los PDF
 
 Casi siempre falta el archivo `pdf.worker.min-*.mjs` de la carpeta `assets/`, o el servidor lo sirve con el tipo MIME equivocado. Revisa el paso 5.3.
+
+### Safari: `undefined is not a function (near '...value of readableStream...')`
+
+**Causa:** una versión anterior de la app leía el PDF con `getTextContent()` de pdf.js, que internamente usa `for await (… of readableStream)`. Safari no implementa la iteración asíncrona de `ReadableStream`, así que ese `for await` fallaba y no se extraía nada. En Chrome y Firefox no se notaba porque ambos sí la implementan.
+
+**Solución:** actualiza la aplicación (`git pull`) y vuelve a compilar y subir el build. La versión actual lee el mismo flujo con `getReader()`, que funciona en todos los navegadores.
+
+---
 
 ### `EACCES` al instalar pnpm globalmente
 
