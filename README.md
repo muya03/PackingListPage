@@ -1,8 +1,16 @@
 # Nexora Ceramica — Generador de Packing Lists
 
-Aplicación web SPA (Single Page Application) desarrollada para **NEXORA CERAMICA S.L.** que automatiza la creación de documentos logísticos (packing lists) a partir de facturas de proveedores en formato PDF.
+Aplicación web SPA (Single Page Application) desarrollada para **NEXORA CERAMICA S.L.** que automatiza la creación de documentos logísticos (packing lists) a partir de facturas y packing lists de proveedores.
 
-El usuario sube una factura PDF, la IA extrae automáticamente los datos de líneas de producto y aplica reglas de conversión de formato cerámico (m² → piezas físicas, palets A-Frame, pesos, CBM). El resultado es una tabla editable que puede exportarse como documento Word (DOCX) o PDF corporativo.
+El usuario sube el documento (PDF, Word, TXT/CSV o una imagen) y **la app lo lee directamente en el navegador, sin IA**: localiza la cabecera de la tabla, mapea cada columna del proveedor a las columnas de NEXORA y transcribe las líneas. A continuación **comprueba sus propias sumas contra los totales que el documento imprime**, de forma que la extracción se valida sola. El resultado es una tabla editable que se exporta como el packing list oficial de NEXORA en PDF (vertical u horizontal) o en Word.
+
+La IA (OpenAI) queda reservada a lo que la lectura directa no puede hacer:
+
+1. **Escaneos y fotos** — un documento sin capa de texto no se puede leer sin mirar los píxeles.
+2. **Verificación bajo demanda** — el botón «Verificar con IA» contrasta la tabla extraída con el texto del documento y señala discrepancias.
+3. **Rescate** — si no se reconoce ninguna tabla, se puede reintentar enviando solo el texto (mucho más barato que enviar el archivo).
+
+Sin clave de OpenAI la aplicación funciona de principio a fin con documentos digitales.
 
 ---
 
@@ -22,14 +30,15 @@ El usuario sube una factura PDF, la IA extrae automáticamente los datos de lín
 
 ## Qué hace la aplicación
 
-1. **Subida de factura PDF** — el usuario arrastra o selecciona una factura de proveedor.
-2. **Extracción con IA** — se envía el PDF a OpenAI GPT-4o Vision, que devuelve los datos estructurados (proveedor, cliente, líneas de producto).
-3. **Conversión automática** — la app aplica reglas de negocio cerámicas: conversión de m² a piezas físicas, cálculo de palets A-Frame, pesos neto/bruto y CBM.
-4. **Tabla editable** — el usuario puede editar cualquier celda; los totales del pie de tabla se recalculan en tiempo real.
-5. **Exportación** — el packing list final se exporta como DOCX corporativo o PDF vectorial en formato apaisado.
-6. **Sesiones guardadas** — opcionalmente, las sesiones se pueden guardar y recuperar desde una base de datos PostgreSQL (requiere el `api-server`).
+1. **Subida del documento** — el usuario arrastra hasta 3 archivos (PDF, DOCX, TXT/CSV o imagen) y les asigna un rol (packing list, factura…).
+2. **Lectura directa, sin IA** — la app extrae el texto con sus coordenadas (pdf.js para PDF, XML de OOXML para Word), detecta la fila de cabecera, convierte cada encabezado reconocido en una banda de columna y lee las líneas cayendo cada dato en su banda.
+3. **Reconstrucción de la expedición** — agrupa las líneas por contenedor (incluidas las celdas combinadas de los packing lists), resuelve el formato numérico (`1.545,00` vs `1,545.00`) y completa con las reglas de NEXORA solo aquellas columnas que el documento no trae (m² → piezas, palets A-Frame, pesos).
+4. **Autoverificación** — compara sus sumas con los totales impresos en el documento y muestra una fiabilidad y una lista de incidencias. Si cuadran, no hace falta ninguna IA.
+5. **Tabla editable** — el usuario puede editar cualquier celda; los totales del pie se recalculan en tiempo real.
+6. **Generación** — el packing list se genera con el modelo oficial de NEXORA en **PDF vertical**, **PDF horizontal** o **DOCX**.
+7. **Sesiones guardadas** — opcionalmente, las sesiones se pueden guardar y recuperar desde una base de datos PostgreSQL (requiere el `api-server`).
 
-> La clave API de OpenAI la introduce el propio usuario en la interfaz y se almacena en `localStorage`. No pasa por ningún servidor propio.
+> La clave API de OpenAI es **opcional**. La introduce el propio usuario en la interfaz y se almacena en `localStorage`. No pasa por ningún servidor propio.
 
 ---
 
@@ -45,7 +54,9 @@ El usuario sube una factura PDF, la IA extrae automáticamente los datos de lín
 | Tailwind CSS | v4 | Estilos |
 | Shadcn UI | — | Componentes de interfaz |
 | TanStack Table | v8 | Tabla editable con agregadores |
-| OpenAI SDK | — | Llamadas a GPT-4o Vision (client-side) |
+| pdf.js (`pdfjs-dist`) | 6.x | Lectura del texto y las coordenadas del PDF, en el navegador |
+| PizZip | 3.x | Descompresión del DOCX para leer `word/document.xml` |
+| OpenAI (fetch) | — | Solo escaneos, verificación y rescate (client-side) |
 | Zod | 3.25 | Validación de esquemas |
 | `docx` | v9+ (ESM) | Generación programática de DOCX |
 | `@react-pdf/renderer` | — | Exportación PDF vectorial |
@@ -78,10 +89,13 @@ PackingListPage/
 ├── artifacts/
 │   ├── nexora-app/          # Frontend React + Vite
 │   │   ├── src/
-│   │   │   ├── components/  # PackingTable, UploadZone, SettingsPanel, SessionsPanel
-│   │   │   ├── services/    # openaiService.ts, calculationsService.ts
+│   │   │   ├── components/  # PackingTable, UploadZone, ExtractionReport, SettingsPanel…
+│   │   │   ├── services/
+│   │   │   │   ├── extraction/   # Motor de lectura sin IA (ver más abajo)
+│   │   │   │   ├── aiService.ts  # OpenAI: escaneos y verificación
+│   │   │   │   └── calculationsService.ts
 │   │   │   ├── types/       # packing.ts (Zod schema + tipos)
-│   │   │   └── utils/       # exportDocx.ts, exportPdf.tsx
+│   │   │   └── utils/       # exportPdf.tsx, exportDocx.ts, nexoraPdfTheme.ts, packingGroups.ts
 │   │   ├── vite.config.ts
 │   │   └── .env             # Variables locales (ver sección Variables de entorno)
 │   └── api-server/          # Backend Express + PostgreSQL (opcional)
@@ -94,6 +108,31 @@ PackingListPage/
 ├── pnpm-workspace.yaml      # Configuración del monorepo
 └── tsconfig.json
 ```
+
+---
+
+## Motor de extracción sin IA
+
+Todo el trabajo normal ocurre en `artifacts/nexora-app/src/services/extraction/`, sin ninguna llamada de red:
+
+| Archivo | Responsabilidad |
+|---|---|
+| `readPdf.ts` | pdf.js: texto de cada página con sus coordenadas; detecta si el PDF es un escaneo |
+| `readDocx.ts` | Descomprime el DOCX y recorre `word/document.xml`: recupera las tablas tal cual, incluidas las anidadas |
+| `lines.ts` | Agrupa los fragmentos de texto en líneas y une los que un PDF partió a mitad de palabra |
+| `fields.ts` | Diccionario de columnas: traduce los encabezados del proveedor (ES/EN/IT) a las columnas de NEXORA |
+| `table.ts` | Localiza la fila de cabecera, convierte cada encabezado en una banda de x y lee las filas |
+| `numbers.ts` | Detecta el formato numérico del documento y parsea `1.545,00`, `1,545.00`, `855.75`… |
+| `metaFields.ts` | Cabecera del documento: nº de factura, cliente, VAT, contenedor, partida arancelaria… |
+| `buildRows.ts` | Construye las líneas de NEXORA, reparte las celdas combinadas por contenedor y aplica las reglas cerámicas a lo que falte |
+| `validate.ts` | Contrasta las sumas con los totales impresos y calcula la fiabilidad |
+
+**Puntos clave del diseño**
+
+- **El encabezado manda.** Una vez reconocida la cabecera, el documento es una rejilla: cada dato cae en la banda de su columna. Los encabezados que no usamos (`Length (m)`, `Height (m)`…) también reservan su banda, para que sus valores no contaminen la columna vecina.
+- **Celdas combinadas.** En un packing list, el contenedor se imprime una vez centrado sobre las líneas que agrupa. La posición de esa celda codifica cuántas líneas abarca, y `buildRows.ts` resuelve esa geometría para devolver cada línea a su contenedor.
+- **Nada se inventa.** Una columna que el documento imprime es la verdad, aunque una celda esté vacía. Solo se calculan con las fórmulas de NEXORA las columnas que el documento no trae, y siempre se avisa de cuáles han sido.
+- **Se valida solo.** Los totales impresos son la referencia: si cuadran, la extracción es correcta y no hace falta IA.
 
 ---
 

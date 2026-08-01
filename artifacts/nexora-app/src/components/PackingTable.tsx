@@ -8,7 +8,7 @@ import {
   type VisibilityState,
 } from "@tanstack/react-table";
 import { Trash2, PlusCircle, Columns3, Check, X, Plus } from "lucide-react";
-import type { TableRow } from "@/types/packing";
+import { makeRowId, type TableRow } from "@/types/packing";
 
 const BADGE_STYLES = [
   "bg-blue-100 text-blue-700 ring-1 ring-blue-300",
@@ -59,6 +59,8 @@ function EditableCell({
 
 const BUILTIN_COLUMN_LABELS: Record<string, string> = {
   source_file: "Origen",
+  contenedor: "CONTENEDOR",
+  precinto: "PRECINTO",
   fam: "FAM",
   formato: "FORMATO",
   modelo: "MODELO",
@@ -131,7 +133,9 @@ export function PackingTable({
     onChange([
       ...data,
       {
-        id: `row-${Date.now()}`,
+        id: makeRowId(),
+        contenedor: data[data.length - 1]?.contenedor ?? "",
+        precinto: data[data.length - 1]?.precinto ?? "",
         fam: "",
         formato: "",
         modelo: "",
@@ -208,6 +212,22 @@ export function PackingTable({
             footer: () => null,
           } as ColumnDef<TableRow>]
         : []),
+      {
+        accessorKey: "contenedor",
+        header: "CONTENEDOR",
+        size: 105,
+        enableHiding: true,
+        cell: ({ row }) => <EditableCell value={row.original.contenedor} rowIndex={row.index} columnId="contenedor" onChange={handleCellChange} />,
+        footer: () => null,
+      },
+      {
+        accessorKey: "precinto",
+        header: "PRECINTO",
+        size: 105,
+        enableHiding: true,
+        cell: ({ row }) => <EditableCell value={row.original.precinto} rowIndex={row.index} columnId="precinto" onChange={handleCellChange} />,
+        footer: () => null,
+      },
       {
         accessorKey: "fam",
         header: "FAM",
@@ -396,7 +416,7 @@ export function PackingTable({
   return (
     <div>
       <div className="overflow-x-auto">
-        <table className="w-full text-xs border-collapse min-w-[900px]">
+        <table className="w-full text-xs border-collapse min-w-[1100px]">
           <thead>
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id} className="bg-primary text-primary-foreground">

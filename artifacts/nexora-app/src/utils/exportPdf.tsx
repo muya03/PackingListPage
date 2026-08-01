@@ -1,297 +1,518 @@
+/**
+ * PDF export — the official NEXORA packing list.
+ *
+ * Renders the approved model: brand header, invoice/buyer/origin panels, the
+ * reference strip, the container-grouped item grid with repeating head, the
+ * shipment summary and customs panel, and the export legal note.
+ *
+ * The same component serves both orientations — every width is a share of the
+ * page, so "vertical" and "horizontal" are the same document reflowed.
+ */
+
 import React from "react";
-import {
-  Document,
-  Page,
-  Text,
-  View,
-  StyleSheet,
-  pdf,
-} from "@react-pdf/renderer";
+import { Document, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
 import { saveAs } from "file-saver";
-import type { TableRow, InvoiceMeta } from "@/types/packing";
+import type { InvoiceMeta, TableRow } from "@/types/packing";
+import { fmtNum } from "@/services/extraction/numbers";
+import {
+  BRAND,
+  COLUMN_WIDTHS,
+  COMPANY,
+  ITEM_WIDTHS,
+  ITEM_BLOCK_WIDTH,
+  ORIGIN_NOTE,
+  VAT_NOTE,
+  pct,
+  type PdfOrientation,
+} from "./nexoraPdfTheme";
+import { computeTotals, designation, groupByContainer } from "./packingGroups";
 
-const fmtNum = (n: number, d = 2) =>
-  n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-
-const C = {
-  black: "#000000",
-  darkGray: "#333333",
-  midGray: "#666666",
-  lightGray: "#CCCCCC",
-  headerBg: "#CCCCCC",
-  white: "#FFFFFF",
-};
+const SANS = "Helvetica";
+const SANS_BOLD = "Helvetica-Bold";
+const SANS_ITALIC = "Helvetica-Oblique";
 
 const styles = StyleSheet.create({
   page: {
-    fontSize: 7,
-    fontFamily: "Helvetica",
-    padding: 24,
-    backgroundColor: C.white,
-    color: C.black,
+    fontFamily: SANS,
+    fontSize: 5.6,
+    color: BRAND.ink,
+    backgroundColor: BRAND.white,
+    paddingTop: 14,
+    paddingHorizontal: 14,
+    paddingBottom: 30,
   },
-  // Company header
-  companyName: { fontSize: 11, fontFamily: "Helvetica-Bold", marginBottom: 1 },
-  companyLine: { fontSize: 8, marginBottom: 1 },
-  spacer: { height: 10 },
-  spacerSm: { height: 5 },
-  // Info two-column block
-  infoRow: { flexDirection: "row", marginBottom: 8 },
-  infoLeft: { flex: 6 },
-  infoRight: { flex: 4 },
-  plTitle: { fontSize: 16, fontFamily: "Helvetica-Bold", marginBottom: 6 },
-  infoLine: { flexDirection: "row", marginBottom: 2 },
-  infoLabel: { fontFamily: "Helvetica-Bold", fontSize: 7, width: 90 },
-  infoValue: { fontSize: 7, flex: 1 },
-  infoDestLabel: { fontFamily: "Helvetica-Bold", fontSize: 7, marginBottom: 3 },
-  infoDestValue: { fontSize: 7, marginBottom: 1 },
-  // Container line
-  containerLine: { flexDirection: "row", flexWrap: "wrap", marginBottom: 8, fontSize: 7 },
-  containerLabel: { fontFamily: "Helvetica-Bold", marginRight: 4 },
-  containerValue: { marginRight: 14 },
-  // Table
-  table: { marginBottom: 6 },
-  tableHeaderRow: { flexDirection: "row", backgroundColor: C.headerBg },
-  tableRow: { flexDirection: "row", borderBottomWidth: 0.5, borderBottomColor: C.lightGray },
-  tableRowAlt: { flexDirection: "row", borderBottomWidth: 0.5, borderBottomColor: C.lightGray, backgroundColor: "#F8F8F8" },
-  tableTotalRow: { flexDirection: "row", borderTopWidth: 1.5, borderTopColor: C.black, backgroundColor: "#F0F0F0" },
-  thCell: {
-    fontFamily: "Helvetica-Bold",
-    fontSize: 6.5,
-    borderWidth: 0.5,
-    borderColor: C.black,
-    paddingVertical: 2,
-    paddingHorizontal: 1,
+
+  /* ── Brand header ── */
+  header: { flexDirection: "row", alignItems: "flex-start", marginBottom: 8 },
+  logoMark: {
+    width: 24,
+    height: 24,
+    borderWidth: 1.2,
+    borderColor: BRAND.gold,
+    borderRadius: 3,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 7,
+  },
+  logoLetter: { fontFamily: "Times-Bold", fontSize: 13, color: BRAND.gold, lineHeight: 1 },
+  brandName: { fontFamily: SANS_BOLD, fontSize: 11.5, letterSpacing: 0.4, lineHeight: 1.05 },
+  brandSuffix: { fontFamily: SANS_BOLD, fontSize: 5.4, letterSpacing: 2.2, color: BRAND.gold, marginTop: 1.5 },
+  headerRight: { marginLeft: "auto", alignItems: "flex-end" },
+  headerRightLine: { fontSize: 5.2, color: BRAND.inkSoft, lineHeight: 1.45 },
+
+  /* ── Title band ── */
+  titleBand: {
+    backgroundColor: BRAND.gold,
+    paddingVertical: 4.2,
+    alignItems: "center",
+    marginBottom: 5.5,
+  },
+  titleText: { fontFamily: SANS_BOLD, fontSize: 8.6, letterSpacing: 3.4, color: BRAND.white },
+
+  /* ── Info panels ── */
+  panelRow: { flexDirection: "row", marginBottom: 4.5 },
+  panel: {
+    borderWidth: 0.6,
+    borderColor: BRAND.goldSoft,
+    paddingVertical: 4.5,
+    paddingHorizontal: 6,
+    minHeight: 44,
+  },
+  panelTitle: {
+    fontFamily: SANS_BOLD,
+    fontSize: 5.4,
+    letterSpacing: 1,
+    color: BRAND.gold,
+    marginBottom: 3.5,
+  },
+  panelLine: { fontSize: 5.8, lineHeight: 1.5 },
+  panelStrong: { fontFamily: SANS_BOLD, fontSize: 5.8, lineHeight: 1.5 },
+
+  /* ── Reference strip ── */
+  stripRow: { flexDirection: "row", borderWidth: 0.6, borderColor: BRAND.goldSoft, marginBottom: 6 },
+  stripCell: { backgroundColor: BRAND.sand, paddingVertical: 3.2, paddingHorizontal: 6, flexDirection: "row" },
+  stripDivider: { width: 0.6, backgroundColor: BRAND.goldSoft },
+  stripLabel: { fontFamily: SANS_BOLD, fontSize: 5.4, letterSpacing: 0.7, color: BRAND.gold },
+  stripValue: { fontSize: 5.4, marginLeft: 3 },
+
+  /* ── Table ── */
+  headRow: { flexDirection: "row", backgroundColor: BRAND.ink },
+  headCell: {
+    fontFamily: SANS_BOLD,
+    fontSize: 5.2,
+    letterSpacing: 0.35,
+    color: BRAND.white,
     textAlign: "center",
+    paddingVertical: 3.4,
+    paddingHorizontal: 1.5,
   },
-  tdCell: {
-    fontSize: 6.5,
-    borderWidth: 0.5,
-    borderColor: C.lightGray,
+  group: { flexDirection: "row", borderBottomWidth: 0.6, borderBottomColor: BRAND.rule },
+  groupCell: {
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 1.5,
     paddingVertical: 2,
-    paddingHorizontal: 1,
-    textAlign: "center",
+    backgroundColor: BRAND.cream,
   },
-  tdTotalCell: {
-    fontFamily: "Helvetica-Bold",
-    fontSize: 6.5,
-    borderWidth: 0.5,
-    borderColor: C.black,
-    paddingVertical: 2,
-    paddingHorizontal: 1,
+  groupIndex: { fontFamily: SANS_BOLD, fontSize: 5.4, color: BRAND.gold },
+  groupText: { fontFamily: SANS_BOLD, fontSize: 5.4, textAlign: "center" },
+  itemBlock: { flexDirection: "column" },
+  itemRow: { flexDirection: "row", alignItems: "center", minHeight: 10.4 },
+  itemDivider: { borderTopWidth: 0.6, borderTopColor: BRAND.rule },
+  cell: { fontSize: 5.4, paddingVertical: 2.4, paddingHorizontal: 2 },
+
+  totalRow: { flexDirection: "row", backgroundColor: BRAND.sand, borderTopWidth: 1, borderTopColor: BRAND.gold },
+  totalLabel: {
+    fontFamily: SANS_BOLD,
+    fontSize: 5.6,
+    letterSpacing: 0.9,
     textAlign: "center",
+    paddingVertical: 3.4,
   },
-  // Summary
-  summaryBlock: { marginTop: 8, marginBottom: 6 },
-  summaryLine: { flexDirection: "row", marginBottom: 2 },
-  summaryLabel: { fontFamily: "Helvetica-Bold", fontSize: 7, width: 130 },
-  summaryValue: { fontSize: 7 },
-  // Legend
-  legendLine: { fontSize: 7, marginBottom: 1 },
-  // CEE table
-  ceeBlock: { marginTop: 8, marginBottom: 6 },
-  // VAT note
-  vatNote: { fontSize: 6.5, color: C.darkGray, marginTop: 10, marginBottom: 6 },
-  // Footer
-  footer: { textAlign: "center", fontSize: 6.5, color: C.midGray, marginTop: 8 },
+  totalValue: { fontFamily: SANS_BOLD, fontSize: 5.6, textAlign: "center", paddingVertical: 3.4, paddingHorizontal: 2 },
+
+  /* ── Summary panels ── */
+  summaryRow: {
+    flexDirection: "row",
+    marginTop: 10,
+    borderTopWidth: 0.6,
+    borderBottomWidth: 0.6,
+    borderColor: BRAND.goldSoft,
+    paddingVertical: 6,
+  },
+  summaryDivider: { width: 0.6, backgroundColor: BRAND.goldSoft, marginHorizontal: 10 },
+  summaryTitle: {
+    fontFamily: SANS_BOLD,
+    fontSize: 5.8,
+    letterSpacing: 1.2,
+    color: BRAND.gold,
+    marginBottom: 4,
+  },
+  summaryLine: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 2.2, paddingHorizontal: 3 },
+  summaryLineAlt: { backgroundColor: BRAND.cream },
+  summaryLabel: { fontSize: 5.6 },
+  summaryValue: { fontFamily: SANS_BOLD, fontSize: 5.6 },
+  ceeLine: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 2.6,
+    paddingHorizontal: 14,
+    borderBottomWidth: 0.6,
+    borderBottomColor: BRAND.rule,
+  },
+  ceeLabel: { fontSize: 5.6, color: BRAND.inkSoft },
+  ceeValue: { fontSize: 5.6 },
+
+  /* ── Closing ── */
+  originBox: {
+    flexDirection: "row",
+    marginTop: 10,
+    borderTopWidth: 0.6,
+    borderBottomWidth: 0.6,
+    borderColor: BRAND.goldSoft,
+  },
+  originText: {
+    fontFamily: SANS_BOLD,
+    fontSize: 5.8,
+    letterSpacing: 0.7,
+    paddingVertical: 4,
+    paddingHorizontal: 3,
+  },
+  vatNote: { fontFamily: SANS_ITALIC, fontSize: 5.4, color: BRAND.ink, marginTop: 6 },
+
+  footer: {
+    position: "absolute",
+    left: 14,
+    right: 14,
+    bottom: 12,
+    borderTopWidth: 0.6,
+    borderTopColor: BRAND.rule,
+    paddingTop: 4,
+    alignItems: "center",
+  },
+  footerText: { fontSize: 5, color: BRAND.inkSoft },
+  pageNumber: { fontSize: 5, color: BRAND.inkSoft, marginTop: 1.5 },
 });
 
-// Column widths (relative flex or fixed points)
-const COL = {
-  fam: 22,
-  formato: 52,
-  modelo: 54,
-  color: 40,
-  cal: 22,
-  tono: 30,
-  clbr: 20,
-  nro_palets: 30,
-  m2: 30,
-  piezas: 28,
-  cajas: 28,
-  peso_neto: 40,
-  peso_bruto: 42,
-};
+const dash = (value: string): string => (value.trim() ? value.trim() : "-");
 
-function Th({ children, w }: { children: string; w: number }) {
-  return <Text style={[styles.thCell, { width: w }]}>{children}</Text>;
-}
-function Td({ children, w, left }: { children: string; w: number; left?: boolean }) {
-  return <Text style={[styles.tdCell, { width: w, textAlign: left ? "left" : "center" }]}>{children}</Text>;
-}
-function TdTotal({ children, w }: { children: string; w: number }) {
-  return <Text style={[styles.tdTotalCell, { width: w }]}>{children}</Text>;
+function Panel({ title, width, children }: { title: string; width: number; children: React.ReactNode }) {
+  return (
+    <View style={[styles.panel, { width: pct(width) }]}>
+      <Text style={styles.panelTitle}>{title}</Text>
+      {children}
+    </View>
+  );
 }
 
-function PackingListDoc({ rows, meta }: { rows: TableRow[]; meta: InvoiceMeta }) {
-  const totalPalets = rows.reduce((s, r) => s + r.nro_palets, 0);
-  const totalM2 = rows.reduce((s, r) => s + r.m2, 0);
-  const totalPiezas = rows.reduce((s, r) => s + r.piezas, 0);
-  const totalCajas = rows.reduce((s, r) => s + r.cajas, 0);
-  const totalPesoNeto = rows.reduce((s, r) => s + r.peso_neto, 0);
-  const totalPesoBruto = rows.reduce((s, r) => s + r.peso_bruto, 0);
+function StripCell({ label, value, width }: { label: string; value: string; width: number }) {
+  return (
+    <View style={[styles.stripCell, { width: pct(width) }]}>
+      <Text style={styles.stripLabel}>{label}:</Text>
+      <Text style={styles.stripValue}>{dash(value)}</Text>
+    </View>
+  );
+}
 
-  const destinatario = [meta.client_name, meta.client_address].filter(Boolean).join(", ");
+function SummaryLine({ label, value, alt }: { label: string; value: string; alt: boolean }) {
+  return (
+    <View style={alt ? [styles.summaryLine, styles.summaryLineAlt] : styles.summaryLine}>
+      <Text style={styles.summaryLabel}>{label}</Text>
+      <Text style={styles.summaryValue}>{value}</Text>
+    </View>
+  );
+}
+
+function CeeLine({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.ceeLine}>
+      <Text style={styles.ceeLabel}>{label}</Text>
+      <Text style={styles.ceeValue}>{dash(value)}</Text>
+    </View>
+  );
+}
+
+const HEAD_COLUMNS: { label: string; width: number }[] = [
+  { label: "Nº", width: COLUMN_WIDTHS.num },
+  { label: "CONTENEDOR", width: COLUMN_WIDTHS.contenedor },
+  { label: "PRECINTO", width: COLUMN_WIDTHS.precinto },
+  { label: "FORMATO", width: COLUMN_WIDTHS.formato },
+  { label: "DESIGNACIÓN / MODELO", width: COLUMN_WIDTHS.modelo },
+  { label: "CAL.", width: COLUMN_WIDTHS.cal },
+  { label: "TONO", width: COLUMN_WIDTHS.tono },
+  { label: "NRO. PALETS", width: COLUMN_WIDTHS.palets },
+  { label: "CAJAS", width: COLUMN_WIDTHS.cajas },
+  { label: "M2", width: COLUMN_WIDTHS.m2 },
+  { label: "PESO BRUTO (KG)", width: COLUMN_WIDTHS.bruto },
+];
+
+export function PackingListDocument({
+  rows,
+  meta,
+  orientation,
+}: {
+  rows: TableRow[];
+  meta: InvoiceMeta;
+  orientation: PdfOrientation;
+}) {
+  const groups = groupByContainer(rows, meta);
+  const totals = computeTotals(rows, groups);
+  const declaredContainers = Number.parseInt(meta.total_contenedores, 10);
+  const containerCount =
+    totals.contenedores || (Number.isFinite(declaredContainers) ? declaredContainers : 1);
+
+  // The address stays on one wrapping line, exactly as the model prints it.
+  const buyerLines = meta.client_address
+    .split(/\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const legend = meta.familia_leyenda.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  let itemIndex = 0;
 
   return (
-    <Document>
-      <Page size="A4" orientation="landscape" style={styles.page}>
-        {/* 1. Company header */}
-        <Text style={styles.companyName}>Nexora Ceramica S.L  B24881047</Text>
-        <Text style={styles.companyLine}>AVENIDA DEL MEDITERRÁNEO, 87, NAVE 3, ONDA</Text>
-        <View style={styles.spacer} />
-
-        {/* 2. Two-column info block */}
-        <View style={styles.infoRow}>
-          <View style={styles.infoLeft}>
-            <Text style={styles.plTitle}>PACKING LIST</Text>
-            <View style={styles.infoLine}>
-              <Text style={styles.infoLabel}>NUMERO FACTURA</Text>
-              <Text style={styles.infoValue}>{meta.invoice_reference}</Text>
-            </View>
-            <View style={styles.infoLine}>
-              <Text style={styles.infoLabel}>FECHA FACTURA</Text>
-              <Text style={styles.infoValue}>{meta.invoice_date}</Text>
-            </View>
-            <View style={styles.infoLine}>
-              <Text style={styles.infoLabel}>CLIENTE</Text>
-              <Text style={styles.infoValue}>{meta.client_name}</Text>
-            </View>
-            <View style={styles.infoLine}>
-              <Text style={styles.infoLabel}>V.A.T</Text>
-              <Text style={styles.infoValue}>{meta.client_vat}</Text>
-            </View>
+    <Document
+      title={`Packing List ${meta.invoice_reference || ""}`.trim()}
+      author={COMPANY.legalName}
+      subject="Packing List"
+      creator={COMPANY.legalName}
+      producer={COMPANY.legalName}
+    >
+      <Page size="A4" orientation={orientation} style={styles.page}>
+        {/* ── Brand header ── */}
+        <View style={styles.header}>
+          <View style={styles.logoMark}>
+            <Text style={styles.logoLetter}>N</Text>
           </View>
-          <View style={styles.infoRight}>
-            <Text style={styles.infoDestLabel}>COMPRADOR - DESTINATARIO</Text>
-            {destinatario.split(",").map((part, i) => (
-              <Text key={i} style={styles.infoDestValue}>{part.trim()}</Text>
-            ))}
+          <View>
+            <Text style={styles.brandName}>{COMPANY.name}</Text>
+            <Text style={styles.brandSuffix}>{COMPANY.suffix}</Text>
+          </View>
+          <View style={styles.headerRight}>
+            <Text style={styles.headerRightLine}>
+              {COMPANY.legalName} — NIF: {COMPANY.nif}
+            </Text>
+            <Text style={styles.headerRightLine}>{COMPANY.street}</Text>
+            <Text style={styles.headerRightLine}>{COMPANY.city}</Text>
+            <Text style={styles.headerRightLine}>{COMPANY.email}</Text>
           </View>
         </View>
 
-        {/* 3. Container info */}
-        {(meta.contenedor || meta.precinto) && (
-          <View style={styles.containerLine}>
-            <Text style={styles.containerLabel}>CONTENEDOR</Text>
-            <Text style={styles.containerValue}>{meta.contenedor}</Text>
-            <Text style={styles.containerLabel}>PRECINTO</Text>
-            <Text style={styles.containerValue}>{meta.precinto}</Text>
-            <Text style={styles.containerLabel}>PESO NETO</Text>
-            <Text style={styles.containerValue}>{fmtNum(totalPesoNeto)}</Text>
-            <Text style={styles.containerLabel}>PESO BRUTO</Text>
-            <Text>{fmtNum(totalPesoBruto)}</Text>
-          </View>
-        )}
+        {/* ── Title band ── */}
+        <View style={styles.titleBand}>
+          <Text style={styles.titleText}>PACKING LIST</Text>
+        </View>
 
-        {/* 4. Main data table */}
-        <View style={styles.table}>
-          {/* Header */}
-          <View style={styles.tableHeaderRow}>
-            <Th w={COL.fam}>FAM</Th>
-            <Th w={COL.formato}>FORMATO</Th>
-            <Th w={COL.modelo}>MODELO</Th>
-            <Th w={COL.color}>COLOR</Th>
-            <Th w={COL.cal}>CAL</Th>
-            <Th w={COL.tono}>TONO</Th>
-            <Th w={COL.clbr}>CLBR</Th>
-            <Th w={COL.nro_palets}>NRO.PALETS</Th>
-            <Th w={COL.m2}>M2</Th>
-            <Th w={COL.piezas}>PIEZAS</Th>
-            <Th w={COL.cajas}>CAJAS</Th>
-            <Th w={COL.peso_neto}>PESO NETO</Th>
-            <Th w={COL.peso_bruto}>PESO BRUTO</Th>
+        {/* ── Invoice · Buyer · Origin ── */}
+        <View style={styles.panelRow}>
+          <Panel title="FACTURA / INVOICE" width={33.4}>
+            <Text style={styles.panelLine}>
+              <Text style={styles.panelStrong}>Nº: </Text>
+              {dash(meta.invoice_reference)}
+            </Text>
+            <Text style={styles.panelLine}>
+              <Text style={styles.panelStrong}>Fecha: </Text>
+              {dash(meta.invoice_date)}
+            </Text>
+            {meta.supplier_name.trim() ? (
+              <Text style={styles.panelLine}>
+                <Text style={styles.panelStrong}>Proveedor: </Text>
+                {meta.supplier_name.trim()}
+              </Text>
+            ) : null}
+          </Panel>
+
+          <Panel title="CLIENTE / BUYER" width={33.3}>
+            <Text style={styles.panelStrong}>{dash(meta.client_name)}</Text>
+            {buyerLines.map((line, i) => (
+              <Text key={`buyer-${i}`} style={styles.panelLine}>
+                {line}
+              </Text>
+            ))}
+            {meta.client_vat.trim() ? (
+              <Text style={styles.panelLine}>VAT: {meta.client_vat.trim()}</Text>
+            ) : null}
+          </Panel>
+
+          <Panel title="ORIGEN DE LA MERCANCÍA" width={33.3}>
+            {meta.origen_mercancia
+              .split(/\s*—\s*|\n/)
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((line, i) => (
+                <Text key={`origin-${i}`} style={styles.panelLine}>
+                  {line}
+                </Text>
+              ))}
+          </Panel>
+        </View>
+
+        {/* ── Reference strip ── */}
+        <View style={styles.stripRow}>
+          <StripCell label="SU REFERENCIA" value={meta.su_referencia} width={33.4} />
+          <View style={styles.stripDivider} />
+          <StripCell label="FORMA DE PAGO" value={meta.forma_pago} width={33.3} />
+          <View style={styles.stripDivider} />
+          <StripCell label="ÚLTIMO TENEDOR" value={meta.ultimo_tenedor || meta.client_name} width={33.3} />
+        </View>
+
+        {/* ── Item grid ── */}
+        <View>
+          <View style={styles.headRow} fixed>
+            {HEAD_COLUMNS.map((column) => (
+              <Text key={column.label} style={[styles.headCell, { width: pct(column.width) }]}>
+                {column.label}
+              </Text>
+            ))}
           </View>
-          {/* Rows */}
-          {rows.map((r, i) => (
-            <View key={r.id} style={i % 2 === 0 ? styles.tableRow : styles.tableRowAlt}>
-              <Td w={COL.fam}>{r.fam}</Td>
-              <Td w={COL.formato} left>{r.formato}</Td>
-              <Td w={COL.modelo} left>{r.modelo}</Td>
-              <Td w={COL.color} left>{r.color}</Td>
-              <Td w={COL.cal}>{r.cal}</Td>
-              <Td w={COL.tono}>{r.tono}</Td>
-              <Td w={COL.clbr}>{r.clbr}</Td>
-              <Td w={COL.nro_palets}>{String(r.nro_palets)}</Td>
-              <Td w={COL.m2}>{fmtNum(r.m2)}</Td>
-              <Td w={COL.piezas}>{String(r.piezas)}</Td>
-              <Td w={COL.cajas}>{String(r.cajas)}</Td>
-              <Td w={COL.peso_neto}>{fmtNum(r.peso_neto)}</Td>
-              <Td w={COL.peso_bruto}>{fmtNum(r.peso_bruto)}</Td>
+
+          {groups.map((group) => (
+            <View key={`group-${group.index}`} style={styles.group} wrap={false}>
+              <View style={[styles.groupCell, { width: pct(COLUMN_WIDTHS.num) }]}>
+                <Text style={styles.groupIndex}>{group.index}</Text>
+              </View>
+              <View style={[styles.groupCell, { width: pct(COLUMN_WIDTHS.contenedor) }]}>
+                <Text style={styles.groupText}>{dash(group.contenedor)}</Text>
+              </View>
+              <View style={[styles.groupCell, { width: pct(COLUMN_WIDTHS.precinto) }]}>
+                <Text style={styles.groupText}>{dash(group.precinto)}</Text>
+              </View>
+
+              <View style={[styles.itemBlock, { width: pct(ITEM_BLOCK_WIDTH) }]}>
+                {group.rows.map((row, rowIndex) => {
+                  itemIndex += 1;
+                  const zebra = itemIndex % 2 === 0 ? BRAND.tint : BRAND.white;
+                  return (
+                    <View
+                      key={row.id}
+                      style={[
+                        styles.itemRow,
+                        rowIndex > 0 ? styles.itemDivider : {},
+                        { backgroundColor: zebra },
+                      ]}
+                    >
+                      <Text style={[styles.cell, { width: pct(ITEM_WIDTHS.formato), textAlign: "center" }]}>
+                        {row.formato}
+                      </Text>
+                      <Text style={[styles.cell, { width: pct(ITEM_WIDTHS.modelo) }]}>{designation(row)}</Text>
+                      <Text style={[styles.cell, { width: pct(ITEM_WIDTHS.cal), textAlign: "center" }]}>
+                        {row.cal}
+                      </Text>
+                      <Text style={[styles.cell, { width: pct(ITEM_WIDTHS.tono), textAlign: "center" }]}>
+                        {row.tono}
+                      </Text>
+                      <Text style={[styles.cell, { width: pct(ITEM_WIDTHS.palets), textAlign: "center" }]}>
+                        {fmtNum(row.nro_palets)}
+                      </Text>
+                      <Text style={[styles.cell, { width: pct(ITEM_WIDTHS.cajas), textAlign: "center" }]}>
+                        {fmtNum(row.cajas)}
+                      </Text>
+                      <Text style={[styles.cell, { width: pct(ITEM_WIDTHS.m2), textAlign: "center" }]}>
+                        {fmtNum(row.m2)}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+
+              <View style={[styles.groupCell, { width: pct(COLUMN_WIDTHS.bruto) }]}>
+                <Text style={styles.groupText}>{fmtNum(group.pesoBruto)}</Text>
+              </View>
             </View>
           ))}
-          {/* Totals */}
-          <View style={styles.tableTotalRow}>
-            <TdTotal w={COL.fam}>{""}</TdTotal>
-            <TdTotal w={COL.formato}>{""}</TdTotal>
-            <TdTotal w={COL.modelo}>{""}</TdTotal>
-            <TdTotal w={COL.color}>{""}</TdTotal>
-            <TdTotal w={COL.cal}>{""}</TdTotal>
-            <TdTotal w={COL.tono}>{""}</TdTotal>
-            <TdTotal w={COL.clbr}>{""}</TdTotal>
-            <TdTotal w={COL.nro_palets}>{String(totalPalets)}</TdTotal>
-            <TdTotal w={COL.m2}>{fmtNum(totalM2)}</TdTotal>
-            <TdTotal w={COL.piezas}>{String(totalPiezas)}</TdTotal>
-            <TdTotal w={COL.cajas}>{String(totalCajas)}</TdTotal>
-            <TdTotal w={COL.peso_neto}>{fmtNum(totalPesoNeto)}</TdTotal>
-            <TdTotal w={COL.peso_bruto}>{fmtNum(totalPesoBruto)}</TdTotal>
+
+          {/* ── Totals ── */}
+          <View style={styles.totalRow}>
+            <Text
+              style={[
+                styles.totalLabel,
+                {
+                  width: pct(
+                    COLUMN_WIDTHS.num +
+                      COLUMN_WIDTHS.contenedor +
+                      COLUMN_WIDTHS.precinto +
+                      COLUMN_WIDTHS.formato +
+                      COLUMN_WIDTHS.modelo +
+                      COLUMN_WIDTHS.cal +
+                      COLUMN_WIDTHS.tono
+                  ),
+                },
+              ]}
+            >
+              TOTAL
+            </Text>
+            <Text style={[styles.totalValue, { width: pct(COLUMN_WIDTHS.palets) }]}>{fmtNum(totals.palets)}</Text>
+            <Text style={[styles.totalValue, { width: pct(COLUMN_WIDTHS.cajas) }]}>{fmtNum(totals.cajas)}</Text>
+            <Text style={[styles.totalValue, { width: pct(COLUMN_WIDTHS.m2) }]}>{fmtNum(totals.m2)}</Text>
+            <Text style={[styles.totalValue, { width: pct(COLUMN_WIDTHS.bruto) }]}>{fmtNum(totals.pesoBruto)}</Text>
           </View>
         </View>
 
-        {/* 5. Summary */}
-        <View style={styles.summaryBlock}>
-          <View style={styles.summaryLine}><Text style={styles.summaryLabel}>PESO BRUTO (Kg)</Text><Text style={styles.summaryValue}>{fmtNum(totalPesoBruto)}</Text></View>
-          <View style={styles.summaryLine}><Text style={styles.summaryLabel}>PESO NETO (Kg)</Text><Text style={styles.summaryValue}>{fmtNum(totalPesoNeto)}</Text></View>
-          <View style={styles.summaryLine}><Text style={styles.summaryLabel}>TOTAL PALETS</Text><Text style={styles.summaryValue}>{String(totalPalets)}</Text></View>
-          <View style={styles.summaryLine}><Text style={styles.summaryLabel}>TOTAL CONTENEDORES</Text><Text style={styles.summaryValue}>{meta.total_contenedores || "1"}</Text></View>
+        {/* ── Summary + customs ── */}
+        <View style={styles.summaryRow} wrap={false}>
+          <View style={{ width: "56%" }}>
+            <Text style={styles.summaryTitle}>RESUMEN DEL ENVÍO</Text>
+            <SummaryLine label="Nº Contenedores:" value={String(containerCount)} alt={false} />
+            <SummaryLine label="Total Palets:" value={fmtNum(totals.palets)} alt />
+            <SummaryLine label="Total Cajas:" value={fmtNum(totals.cajas)} alt={false} />
+            <SummaryLine label="Total M2:" value={fmtNum(totals.m2)} alt />
+            {totals.piezas > 0 ? (
+              <SummaryLine label="Total Piezas:" value={fmtNum(totals.piezas, 0)} alt={false} />
+            ) : null}
+            <SummaryLine label="Peso Neto:" value={`${fmtNum(totals.pesoNeto)} Kg`} alt />
+            <SummaryLine label="Peso Bruto:" value={`${fmtNum(totals.pesoBruto)} Kg`} alt={false} />
+          </View>
+
+          <View style={styles.summaryDivider} />
+
+          <View style={{ flex: 1 }}>
+            <Text style={styles.summaryTitle}>CÓDIGO C.E.E.</Text>
+            <CeeLine label="Partida Arancelaria:" value={meta.partida_arancelaria} />
+            <CeeLine label="País de Origen:" value={meta.pais_origen} />
+            <CeeLine label="País de Destino:" value={meta.pais_destino} />
+            {legend.map((line) => {
+              const [code, ...rest] = line.split(/\s+/);
+              return <CeeLine key={line} label={`Familia ${code}:`} value={rest.join(" ")} />;
+            })}
+          </View>
         </View>
 
-        {/* 6. Family legend */}
-        {meta.familia_leyenda && (
-          <View>
-            {meta.familia_leyenda.split("\n").filter(Boolean).map((line, i) => (
-              <Text key={i} style={styles.legendLine}>{line.trim()}</Text>
-            ))}
-          </View>
-        )}
+        {/* ── Closing ── */}
+        <View style={styles.originBox} wrap={false}>
+          <Text style={styles.originText}>{ORIGIN_NOTE}</Text>
+        </View>
+        <Text style={styles.vatNote}>{VAT_NOTE}</Text>
 
-        {/* 7. CEE codes table */}
-        {meta.codigo_cee && (
-          <View style={styles.ceeBlock}>
-            <View style={styles.tableHeaderRow}>
-              <Th w={200}>{meta.codigo_cee.length > 40 ? meta.codigo_cee.substring(0, 40) + "…" : meta.codigo_cee}</Th>
-              <Th w={50}>M2</Th>
-              <Th w={70}>PESO BRUTO</Th>
-              <Th w={70}>PESO NETO</Th>
-              <Th w={50}>PALETS</Th>
-            </View>
-            <View style={styles.tableRow}>
-              <Td w={200} left>{meta.codigo_cee}</Td>
-              <Td w={50}>{fmtNum(totalM2)}</Td>
-              <Td w={70}>{fmtNum(totalPesoBruto)}</Td>
-              <Td w={70}>{fmtNum(totalPesoNeto)}</Td>
-              <Td w={50}>{String(totalPalets)}</Td>
-            </View>
-          </View>
-        )}
-
-        {/* 8. VAT note */}
-        <Text style={styles.vatNote}>
-          Operacion exenta de IVA de conformidad al articulo 21 de la Ley 37/1992 del Impuesto sobre el valor Añadido
-        </Text>
-
-        {/* 9. Footer */}
-        <Text style={styles.footer}>info@nexoraceramica.es</Text>
-        <Text style={styles.footer}>Page   1/1</Text>
+        <View style={styles.footer} fixed>
+          <Text style={styles.footerText}>
+            {COMPANY.legalName} — NIF: {COMPANY.nif} — {COMPANY.street}, {COMPANY.city} — {COMPANY.email}
+          </Text>
+          <Text
+            style={styles.pageNumber}
+            render={({ pageNumber, totalPages }) => `${pageNumber} / ${totalPages}`}
+          />
+        </View>
       </Page>
     </Document>
   );
 }
 
+export async function buildPackingListPdfBlob(
+  rows: TableRow[],
+  meta: InvoiceMeta,
+  orientation: PdfOrientation = "portrait"
+): Promise<Blob> {
+  return pdf(<PackingListDocument rows={rows} meta={meta} orientation={orientation} />).toBlob();
+}
+
 export async function exportPackingListPdf(
   rows: TableRow[],
-  meta: InvoiceMeta
+  meta: InvoiceMeta,
+  orientation: PdfOrientation = "portrait"
 ): Promise<void> {
-  const blob = await pdf(<PackingListDoc rows={rows} meta={meta} />).toBlob();
-  saveAs(blob, `PackingList_NEXORA_${meta.invoice_reference || "export"}.pdf`);
+  const blob = await buildPackingListPdfBlob(rows, meta, orientation);
+  const reference = (meta.invoice_reference || "export").replace(/[^\w.-]+/g, "_");
+  const suffix = orientation === "portrait" ? "VERTICAL" : "HORIZONTAL";
+  saveAs(blob, `PACKING_LIST_${reference}_${suffix}.pdf`);
 }

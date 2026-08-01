@@ -1,87 +1,102 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { Download, Loader2, AlertCircle, CheckCircle, RefreshCw, FileDown, Maximize2, Minimize2 } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle,
+  FileDown,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  RefreshCw,
+  Download,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { UploadZone } from "@/components/UploadZone";
 import { PackingTable } from "@/components/PackingTable";
 import { SessionsPanel } from "@/components/SessionsPanel";
+import { ExtractionReport } from "@/components/ExtractionReport";
 import { TemplateUploadPanel, type CustomTemplate } from "@/components/TemplateUploadPanel";
-import { extractInvoiceData, type PdfFile } from "@/services/openaiService";
+import {
+  analyze,
+  readDocuments,
+  fmtNum,
+  type ExtractionIssue,
+  type ExtractionResult,
+  type SourceDocument,
+} from "@/services/extraction";
+import { aiReadScan, aiReadText, aiVerify, verificationToIssues } from "@/services/aiService";
 import { exportPackingListDocx } from "@/utils/exportDocx";
 import { exportPackingListPdf } from "@/utils/exportPdf";
+import type { PdfOrientation } from "@/utils/nexoraPdfTheme";
 import { saveTemplate, loadTemplate, clearTemplate } from "@/utils/templateStorage";
-import type { TableRow, InvoiceMeta } from "@/types/packing";
+import {
+  EMPTY_META,
+  normalizeMeta,
+  normalizeRow,
+  type InvoiceMeta,
+  type InvoiceResponse,
+  type TableRow,
+} from "@/types/packing";
 
 type AppState = "idle" | "loading" | "done" | "error";
 
-const EMPTY_META: InvoiceMeta = {
-  invoice_reference: "",
-  invoice_date: "",
-  supplier_name: "",
-  client_name: "",
-  client_vat: "",
-  client_address: "",
-  contenedor: "",
-  precinto: "",
-  familia_leyenda: "",
-  codigo_cee: "",
-  total_contenedores: "1",
-};
+const GOLD = "hsl(38 57% 54%)";
 
-function toTableRow(item: {
-  fam: string;
-  formato: string;
-  modelo: string;
-  color: string;
-  cal: string;
-  tono: string;
-  clbr: string;
-  nro_palets: number;
-  m2: number;
-  piezas: number;
-  cajas: number;
-  peso_neto: number;
-  peso_bruto: number;
-  source_file?: string;
-}): TableRow {
+/** Below this the extraction is shaky enough to be worth an AI second pass. */
+const LOW_CONFIDENCE = 0.5;
+
+const META_FIELDS: { label: string; key: keyof InvoiceMeta; wide?: boolean }[] = [
+  { label: "Nº Factura", key: "invoice_reference" },
+  { label: "Fecha", key: "invoice_date" },
+  { label: "Cliente", key: "client_name" },
+  { label: "VAT Cliente", key: "client_vat" },
+  { label: "Su Referencia", key: "su_referencia" },
+  { label: "Forma de Pago", key: "forma_pago" },
+  { label: "Último Tenedor", key: "ultimo_tenedor" },
+  { label: "Contenedor", key: "contenedor" },
+  { label: "Precinto", key: "precinto" },
+  { label: "Total Contenedores", key: "total_contenedores" },
+  { label: "Partida Arancelaria", key: "partida_arancelaria" },
+  { label: "País Origen", key: "pais_origen" },
+  { label: "País Destino", key: "pais_destino" },
+  { label: "Proveedor", key: "supplier_name" },
+  { label: "Dirección Destinatario", key: "client_address", wide: true },
+  { label: "Origen de la Mercancía", key: "origen_mercancia", wide: true },
+  { label: "Código C.E.E.", key: "codigo_cee", wide: true },
+  { label: "Leyenda Familias", key: "familia_leyenda", wide: true },
+];
+
+function fromAiResponse(response: InvoiceResponse, method: ExtractionResult["method"]): Partial<ExtractionResult> {
   return {
-    id: `row-${Math.random().toString(36).slice(2)}`,
-    fam: item.fam,
-    formato: item.formato,
-    modelo: item.modelo,
-    color: item.color,
-    cal: item.cal,
-    tono: item.tono,
-    clbr: item.clbr,
-    nro_palets: item.nro_palets,
-    m2: item.m2,
-    piezas: item.piezas,
-    cajas: item.cajas,
-    peso_neto: item.peso_neto,
-    peso_bruto: item.peso_bruto,
-    source_file: item.source_file ?? "",
-    custom_fields: {},
+    meta: normalizeMeta(response as unknown as Partial<InvoiceMeta>),
+    rows: response.items.map((item) => normalizeRow(item)),
+    method,
   };
 }
 
 export default function App() {
   const [apiKey, setApiKey] = useState("");
-  const [pdfFiles, setPdfFiles] = useState<PdfFile[]>([]);
+  const [sources, setSources] = useState<SourceDocument[]>([]);
   const [appState, setAppState] = useState<AppState>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [tableRows, setTableRows] = useState<TableRow[]>([]);
   const [meta, setMeta] = useState<InvoiceMeta>(EMPTY_META);
+  const [result, setResult] = useState<ExtractionResult | null>(null);
+  const [aiIssues, setAiIssues] = useState<ExtractionIssue[]>([]);
+  const [isVerifying, setIsVerifying] = useState(false);
   const [tableExpanded, setTableExpanded] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState<PdfOrientation | null>(null);
   const [isExportingDocx, setIsExportingDocx] = useState(false);
-  const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [docxExportError, setDocxExportError] = useState("");
   const [uploadKey, setUploadKey] = useState(0);
   const [customTemplate, setCustomTemplate] = useState<CustomTemplate | null>(null);
 
   useEffect(() => {
-    loadTemplate().then((stored) => {
-      if (stored) setCustomTemplate(stored);
-    }).catch(() => {});
+    loadTemplate()
+      .then((stored) => {
+        if (stored) setCustomTemplate(stored);
+      })
+      .catch(() => {});
   }, []);
 
   const handleTemplateChange = useCallback((template: CustomTemplate | null) => {
@@ -90,56 +105,101 @@ export default function App() {
     else clearTemplate().catch(() => {});
   }, []);
 
-  const handleFilesChanged = useCallback((files: PdfFile[]) => setPdfFiles(files), []);
+  const handleFilesChanged = useCallback((files: SourceDocument[]) => setSources(files), []);
 
+  /**
+   * Reads the documents offline first. The model is only called for the parts
+   * the reader genuinely cannot see: pages with no text layer, or a table it
+   * could not recognise at all.
+   */
   const handleProcess = async () => {
-    if (pdfFiles.length === 0) return;
-    if (!apiKey) {
-      setErrorMsg("Configura tu clave de API OpenAI antes de procesar.");
-      setAppState("error");
-      return;
-    }
-    if (pdfFiles.length === 2 && pdfFiles[0].role === pdfFiles[1].role) return;
+    if (sources.length === 0) return;
     setAppState("loading");
     setErrorMsg("");
+    setAiIssues([]);
+
     try {
-      const result = await extractInvoiceData(pdfFiles, apiKey);
-      setMeta({
-        invoice_reference: result.invoice_reference,
-        invoice_date: result.invoice_date,
-        supplier_name: result.supplier_name,
-        client_name: result.client_name || "",
-        client_vat: result.client_vat || "",
-        client_address: result.client_address || "",
-        contenedor: result.contenedor || "",
-        precinto: result.precinto || "",
-        familia_leyenda: result.familia_leyenda || "",
-        codigo_cee: result.codigo_cee || "",
-        total_contenedores: result.total_contenedores || "1",
-      });
-      setTableRows(result.items.map(toTableRow));
-      setAppState("done");
+      const documents = await readDocuments(sources);
+      let extraction = analyze(documents);
+
+      const scans = sources.filter((s, i) => documents[i]?.isScanned || s.kind === "image");
+      const needsVision = extraction.rows.length === 0 && scans.length > 0;
+      const needsTextRescue =
+        extraction.rows.length === 0 && scans.length === 0 && documents.some((d) => d.plainText.trim());
+
+      if ((needsVision || needsTextRescue) && !apiKey) {
+        throw new Error(
+          needsVision
+            ? "El documento es una imagen o un escaneo sin texto. Configura una clave de OpenAI para poder leerlo."
+            : "No se ha reconocido ninguna tabla en el documento. Configura una clave de OpenAI para intentar leerlo con IA."
+        );
+      }
+
+      if (needsVision) {
+        const response = await aiReadScan(scans, apiKey);
+        extraction = { ...extraction, ...fromAiResponse(response, "ai-vision") } as ExtractionResult;
+      } else if (needsTextRescue) {
+        const response = await aiReadText(documents, apiKey);
+        extraction = { ...extraction, ...fromAiResponse(response, "ai-text") } as ExtractionResult;
+      }
+
+      setResult(extraction);
+      setMeta(extraction.meta);
+      setTableRows(extraction.rows);
+      setAppState(extraction.rows.length > 0 ? "done" : "error");
+      if (extraction.rows.length === 0) {
+        setErrorMsg("No se han encontrado líneas de artículo en los documentos cargados.");
+      }
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "Error desconocido.");
       setAppState("error");
     }
   };
 
+  const handleVerify = async () => {
+    if (!result || !apiKey) return;
+    setIsVerifying(true);
+    setAiIssues([]);
+    try {
+      const verification = await aiVerify(tableRows, result.documents, apiKey);
+      setAiIssues(verificationToIssues(verification));
+    } catch (e) {
+      setAiIssues([
+        { level: "error", message: e instanceof Error ? e.message : "No se ha podido verificar con IA." },
+      ]);
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
   const handleReset = () => {
-    setPdfFiles([]);
+    setSources([]);
     setTableRows([]);
     setMeta(EMPTY_META);
+    setResult(null);
+    setAiIssues([]);
     setAppState("idle");
     setErrorMsg("");
     setUploadKey((k) => k + 1);
   };
 
   const handleRestoreSession = useCallback((rows: TableRow[], restoredMeta: InvoiceMeta) => {
-    setTableRows(rows);
-    setMeta(restoredMeta);
+    setTableRows(rows.map((row) => normalizeRow(row)));
+    setMeta(normalizeMeta(restoredMeta));
+    setResult(null);
+    setAiIssues([]);
     setAppState("done");
     setErrorMsg("");
   }, []);
+
+  const handleExportPdf = async (orientation: PdfOrientation) => {
+    setExportingPdf(orientation);
+    try {
+      await exportPackingListPdf(tableRows, meta, orientation);
+    } finally {
+      setExportingPdf(null);
+    }
+  };
 
   const handleExportDocx = async () => {
     setIsExportingDocx(true);
@@ -153,40 +213,16 @@ export default function App() {
     }
   };
 
-  const handleExportPdf = async () => {
-    setIsExportingPdf(true);
-    try {
-      await exportPackingListPdf(tableRows, meta);
-    } finally {
-      setIsExportingPdf(false);
-    }
-  };
-
   const totalM2 = tableRows.reduce((s, r) => s + r.m2, 0);
-  const totalPiezas = tableRows.reduce((s, r) => s + r.piezas, 0);
+  const totalCajas = tableRows.reduce((s, r) => s + r.cajas, 0);
   const totalPesoNeto = tableRows.reduce((s, r) => s + r.peso_neto, 0);
   const totalPesoBruto = tableRows.reduce((s, r) => s + r.peso_bruto, 0);
   const hasData = tableRows.length > 0;
-  const hasMultipleFiles = pdfFiles.length > 1;
-  const hasDuplicateRoles = pdfFiles.length === 2 && pdfFiles[0].role === pdfFiles[1].role;
-
-  const META_FIELDS: { label: string; key: keyof InvoiceMeta }[] = [
-    { label: "Nº Factura", key: "invoice_reference" },
-    { label: "Fecha", key: "invoice_date" },
-    { label: "Proveedor", key: "supplier_name" },
-    { label: "Cliente", key: "client_name" },
-    { label: "VAT Cliente", key: "client_vat" },
-    { label: "Dirección Destinatario", key: "client_address" },
-    { label: "Contenedor", key: "contenedor" },
-    { label: "Precinto", key: "precinto" },
-    { label: "Leyenda Familias", key: "familia_leyenda" },
-    { label: "Código CEE", key: "codigo_cee" },
-    { label: "Total Contenedores", key: "total_contenedores" },
-  ];
+  const hasMultipleFiles = sources.length > 1;
+  const duplicateRoles = new Set(sources.map((s) => s.role)).size !== sources.length;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-
       {/* NEXORA Brand Header */}
       <header className="bg-foreground text-white border-b border-white/10">
         <div className="max-w-screen-2xl mx-auto px-8 py-5 flex items-center justify-between">
@@ -199,45 +235,31 @@ export default function App() {
             </h1>
             <p
               className="mt-1 uppercase font-display font-medium"
-              style={{ fontSize: "0.58rem", letterSpacing: "0.18em", color: "hsl(38 57% 54%)" }}
+              style={{ fontSize: "0.58rem", letterSpacing: "0.18em", color: GOLD }}
             >
               Generador de Packing Lists
             </p>
           </div>
           <div className="hidden md:flex items-center gap-2 text-xs" style={{ color: "rgba(255,255,255,0.4)" }}>
             <span className="font-display" style={{ letterSpacing: "0.06em" }}>B24881047</span>
-            <span style={{ color: "hsl(38 57% 54%)" }}>·</span>
+            <span style={{ color: GOLD }}>·</span>
             <span>info@nexoraceramica.es</span>
           </div>
         </div>
       </header>
 
-      <div style={{ height: "2px", background: "hsl(38 57% 54%)" }} />
+      <div style={{ height: "2px", background: GOLD }} />
 
       <main className="max-w-screen-2xl mx-auto px-8 py-8 space-y-6">
         <div className={`grid grid-cols-1 gap-6 transition-all duration-300 ${tableExpanded ? "" : "lg:grid-cols-3"}`}>
-
           {/* ── LEFT SIDEBAR ── */}
           <div className={`space-y-4 ${tableExpanded ? "hidden" : "lg:col-span-1"}`}>
-            <SettingsPanel onApiKeyChange={setApiKey} />
-
-            <TemplateUploadPanel
-              onTemplateChange={handleTemplateChange}
-              currentTemplate={customTemplate}
-            />
-
-            <SessionsPanel
-              tableRows={tableRows}
-              meta={meta}
-              onRestoreSession={handleRestoreSession}
-            />
-
             {/* Step 1 — Upload */}
             <div className="border border-border bg-card p-5 shadow-sm space-y-4">
               <div className="flex items-center gap-3">
                 <span
                   className="flex items-center justify-center font-display font-semibold text-white text-xs"
-                  style={{ width: "22px", height: "22px", background: "hsl(38 57% 54%)", letterSpacing: "0", flexShrink: 0 }}
+                  style={{ width: "22px", height: "22px", background: GOLD, flexShrink: 0 }}
                 >
                   1
                 </span>
@@ -245,37 +267,39 @@ export default function App() {
                   <h2 className="text-sm font-display font-semibold text-foreground uppercase tracking-widest-plus">
                     Cargar Documentos
                   </h2>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Factura, packing list, o ambos juntos
-                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">Factura, packing list, o ambos juntos</p>
                 </div>
               </div>
 
-              <UploadZone
-                key={uploadKey}
-                onFilesChanged={handleFilesChanged}
-                disabled={appState === "loading"}
-              />
+              <UploadZone key={uploadKey} onFilesChanged={handleFilesChanged} disabled={appState === "loading"} />
 
               <Button
                 className="w-full font-display font-medium tracking-widest-plus uppercase text-xs"
                 onClick={handleProcess}
-                disabled={pdfFiles.length === 0 || !apiKey || appState === "loading" || hasDuplicateRoles}
+                disabled={sources.length === 0 || appState === "loading" || duplicateRoles}
                 style={{ letterSpacing: "0.12em" }}
               >
                 {appState === "loading" ? (
-                  <><Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />Procesando con IA...</>
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                    Leyendo documentos...
+                  </>
                 ) : (
                   <>
-                    Procesar con IA
-                    {pdfFiles.length > 1 && (
+                    Extraer datos
+                    {sources.length > 1 && (
                       <span className="ml-2 bg-white/20 text-xs px-1.5 py-0.5" style={{ letterSpacing: "0" }}>
-                        {pdfFiles.length} PDFs
+                        {sources.length}
                       </span>
                     )}
                   </>
                 )}
               </Button>
+
+              <p className="text-xs text-muted-foreground">
+                La lectura se hace en tu navegador, sin IA. Solo se recurre a OpenAI si el archivo es una foto o un
+                escaneo sin texto, o si pides una verificación.
+              </p>
 
               {appState === "error" && (
                 <div className="border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive flex items-start gap-2">
@@ -285,10 +309,16 @@ export default function App() {
               )}
 
               {appState === "done" && (
-                <div className="p-3 text-xs flex items-center gap-2"
-                  style={{ background: "hsl(142 50% 42% / 0.08)", border: "1px solid hsl(142 50% 42% / 0.25)", color: "hsl(142 50% 32%)" }}>
+                <div
+                  className="p-3 text-xs flex items-center gap-2"
+                  style={{
+                    background: "hsl(142 50% 42% / 0.08)",
+                    border: "1px solid hsl(142 50% 42% / 0.25)",
+                    color: "hsl(142 50% 32%)",
+                  }}
+                >
                   <CheckCircle className="w-4 h-4 shrink-0" />
-                  <span>Datos extraídos{hasMultipleFiles ? " de ambos documentos" : ""}. Revisa y edita la tabla.</span>
+                  <span>Datos extraídos{hasMultipleFiles ? " de todos los documentos" : ""}. Revisa la tabla.</span>
                 </div>
               )}
             </div>
@@ -299,19 +329,48 @@ export default function App() {
                 <div className="flex items-center gap-3">
                   <span
                     className="flex items-center justify-center font-display font-semibold text-white text-xs"
-                    style={{ width: "22px", height: "22px", background: "hsl(38 57% 54%)", flexShrink: 0 }}
+                    style={{ width: "22px", height: "22px", background: GOLD, flexShrink: 0 }}
                   >
                     2
                   </span>
                   <div>
                     <h2 className="text-sm font-display font-semibold text-foreground uppercase tracking-widest-plus">
-                      Exportar
+                      Generar Packing List
                     </h2>
-                    <p className="text-xs text-muted-foreground mt-0.5">Descarga el documento corporativo</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">Modelo oficial NEXORA</p>
                   </div>
                 </div>
 
                 <div className="space-y-2">
+                  <Button
+                    className="w-full justify-start gap-2 text-xs font-medium uppercase"
+                    style={{ letterSpacing: "0.08em" }}
+                    onClick={() => handleExportPdf("portrait")}
+                    disabled={exportingPdf !== null}
+                  >
+                    {exportingPdf === "portrait" ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <FileDown className="w-3.5 h-3.5" />
+                    )}
+                    Generar PDF · Vertical
+                  </Button>
+
+                  <Button
+                    variant="outline"
+                    className="w-full justify-start gap-2 text-xs font-medium uppercase"
+                    style={{ letterSpacing: "0.08em" }}
+                    onClick={() => handleExportPdf("landscape")}
+                    disabled={exportingPdf !== null}
+                  >
+                    {exportingPdf === "landscape" ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <FileDown className="w-3.5 h-3.5" />
+                    )}
+                    Generar PDF · Horizontal
+                  </Button>
+
                   <Button
                     variant="outline"
                     className="w-full justify-start gap-2 text-xs font-medium uppercase"
@@ -319,7 +378,11 @@ export default function App() {
                     onClick={handleExportDocx}
                     disabled={isExportingDocx}
                   >
-                    {isExportingDocx ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                    {isExportingDocx ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5" />
+                    )}
                     Packing List (DOCX)
                   </Button>
 
@@ -329,17 +392,6 @@ export default function App() {
                       <span>{docxExportError}</span>
                     </div>
                   )}
-
-                  <Button
-                    variant="outline"
-                    className="w-full justify-start gap-2 text-xs font-medium uppercase"
-                    style={{ letterSpacing: "0.08em" }}
-                    onClick={handleExportPdf}
-                    disabled={isExportingPdf}
-                  >
-                    {isExportingPdf ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
-                    Packing List (PDF)
-                  </Button>
                 </div>
 
                 <button
@@ -352,10 +404,35 @@ export default function App() {
                 </button>
               </div>
             )}
+
+            <SessionsPanel tableRows={tableRows} meta={meta} onRestoreSession={handleRestoreSession} />
+
+            <SettingsPanel onApiKeyChange={setApiKey} />
+
+            <TemplateUploadPanel onTemplateChange={handleTemplateChange} currentTemplate={customTemplate} />
           </div>
 
           {/* ── MAIN CONTENT ── */}
           <div className={`space-y-5 ${tableExpanded ? "" : "lg:col-span-2"}`}>
+            {result && (
+              <ExtractionReport
+                result={result}
+                hasApiKey={Boolean(apiKey)}
+                isVerifying={isVerifying}
+                onVerify={handleVerify}
+                aiIssues={aiIssues}
+              />
+            )}
+
+            {result && result.confidence < LOW_CONFIDENCE && result.rows.length > 0 && (
+              <div className="border p-3 text-xs flex items-start gap-2" style={{ borderColor: GOLD, background: "hsl(38 57% 54% / 0.07)" }}>
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" style={{ color: GOLD }} />
+                <span>
+                  El documento se ha entendido solo parcialmente. Revisa la tabla con atención antes de generar el
+                  packing list{apiKey ? ", o lanza una verificación con IA." : "."}
+                </span>
+              </div>
+            )}
 
             {/* Expedition metadata */}
             {hasData && (
@@ -367,9 +444,12 @@ export default function App() {
                   Datos de la Expedición
                 </h3>
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-4">
-                  {META_FIELDS.map(({ label, key }) => (
-                    <div key={key} className={key === "client_address" || key === "familia_leyenda" || key === "codigo_cee" ? "col-span-2 md:col-span-3" : ""}>
-                      <p className="text-xs text-muted-foreground font-display uppercase mb-1" style={{ letterSpacing: "0.1em" }}>
+                  {META_FIELDS.map(({ label, key, wide }) => (
+                    <div key={key} className={wide ? "col-span-2 md:col-span-3" : ""}>
+                      <p
+                        className="text-xs text-muted-foreground font-display uppercase mb-1"
+                        style={{ letterSpacing: "0.1em" }}
+                      >
                         {label}
                       </p>
                       {key === "familia_leyenda" ? (
@@ -377,13 +457,13 @@ export default function App() {
                           rows={2}
                           className="text-sm font-semibold text-foreground w-full bg-transparent border-b border-transparent hover:border-border focus:border-foreground focus:outline-none py-0.5 transition-colors resize-none"
                           value={meta[key]}
-                          onChange={e => setMeta(m => ({ ...m, [key]: e.target.value }))}
+                          onChange={(e) => setMeta((m) => ({ ...m, [key]: e.target.value }))}
                         />
                       ) : (
                         <input
                           className="text-sm font-semibold text-foreground w-full bg-transparent border-b border-transparent hover:border-border focus:border-foreground focus:outline-none py-0.5 transition-colors"
                           value={meta[key]}
-                          onChange={e => setMeta(m => ({ ...m, [key]: e.target.value }))}
+                          onChange={(e) => setMeta((m) => ({ ...m, [key]: e.target.value }))}
                         />
                       )}
                     </div>
@@ -396,10 +476,10 @@ export default function App() {
             {hasData && (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 {[
-                  { label: "Total M²", value: totalM2.toFixed(2), unit: "m²" },
-                  { label: "Total Piezas", value: String(totalPiezas), unit: "" },
-                  { label: "Peso Neto", value: totalPesoNeto.toLocaleString("en-US", { minimumFractionDigits: 2 }), unit: "kg" },
-                  { label: "Peso Bruto", value: totalPesoBruto.toLocaleString("en-US", { minimumFractionDigits: 2 }), unit: "kg" },
+                  { label: "Total M²", value: fmtNum(totalM2), unit: "m²" },
+                  { label: "Total Cajas", value: fmtNum(totalCajas), unit: "" },
+                  { label: "Peso Neto", value: fmtNum(totalPesoNeto), unit: "kg" },
+                  { label: "Peso Bruto", value: fmtNum(totalPesoBruto), unit: "kg" },
                 ].map((stat) => (
                   <div key={stat.label} className="border border-border bg-card p-4 shadow-sm">
                     <p className="text-xs text-muted-foreground font-display uppercase" style={{ letterSpacing: "0.1em" }}>
@@ -408,7 +488,10 @@ export default function App() {
                     <p className="text-2xl font-semibold text-foreground mt-1.5 font-display">
                       {stat.value}
                       {stat.unit && (
-                        <span className="text-sm font-normal text-muted-foreground ml-1.5" style={{ fontFamily: "var(--app-font-sans)" }}>
+                        <span
+                          className="text-sm font-normal text-muted-foreground ml-1.5"
+                          style={{ fontFamily: "var(--app-font-sans)" }}
+                        >
                           {stat.unit}
                         </span>
                       )}
@@ -424,7 +507,10 @@ export default function App() {
                 <h2 className="text-xs font-display font-semibold text-foreground uppercase" style={{ letterSpacing: "0.16em" }}>
                   Líneas del Packing List
                   {hasData && (
-                    <span className="ml-2 font-normal text-muted-foreground" style={{ letterSpacing: "0", fontFamily: "var(--app-font-sans)" }}>
+                    <span
+                      className="ml-2 font-normal text-muted-foreground"
+                      style={{ letterSpacing: "0", fontFamily: "var(--app-font-sans)" }}
+                    >
                       ({tableRows.length} {tableRows.length === 1 ? "artículo" : "artículos"})
                     </span>
                   )}
@@ -436,9 +522,15 @@ export default function App() {
                   style={{ letterSpacing: "0.1em" }}
                 >
                   {tableExpanded ? (
-                    <><Minimize2 className="w-3.5 h-3.5" />Reducir</>
+                    <>
+                      <Minimize2 className="w-3.5 h-3.5" />
+                      Reducir
+                    </>
                   ) : (
-                    <><Maximize2 className="w-3.5 h-3.5" />Expandir</>
+                    <>
+                      <Maximize2 className="w-3.5 h-3.5" />
+                      Expandir
+                    </>
                   )}
                 </button>
               </div>
@@ -447,8 +539,8 @@ export default function App() {
                   data={tableRows}
                   onChange={setTableRows}
                   showSourceFile={hasMultipleFiles}
-                  sourceFileNames={pdfFiles.map((f) => f.filename)}
-                  sourceFileRoles={Object.fromEntries(pdfFiles.map((f) => [f.filename, f.role]))}
+                  sourceFileNames={sources.map((f) => f.filename)}
+                  sourceFileRoles={Object.fromEntries(sources.map((f) => [f.filename, f.role]))}
                 />
               </div>
             </div>
@@ -464,9 +556,7 @@ export default function App() {
           <p className="text-xs text-muted-foreground">
             B24881047 · Av. del Mediterráneo, 87, Nave 3, Onda · info@nexoraceramica.es
           </p>
-          <p className="text-xs text-muted-foreground opacity-50">
-            Plataforma interna de automatización logística
-          </p>
+          <p className="text-xs text-muted-foreground opacity-50">Plataforma interna de automatización logística</p>
         </div>
       </footer>
     </div>

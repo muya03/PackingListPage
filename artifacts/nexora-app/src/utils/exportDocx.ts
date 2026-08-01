@@ -1,382 +1,461 @@
 /**
  * DOCX Export — NEXORA CERAMICA S.L.
  *
- * Generates a packing list document matching the official NEXORA layout:
- * company header, two-column info block, container line, tile data table,
- * totals, summary, family legend, customs code table, VAT note, footer.
+ * Word version of the same packing list model the PDF renders: brand header,
+ * invoice/buyer/origin panels, reference strip, container-grouped grid with a
+ * totals row, shipment summary, customs block and the export note.
  *
- * Uses the `docx` library (v9) for programmatic OOXML generation.
+ * Layout and wording come from `nexoraPdfTheme` and `packingGroups`, so the two
+ * exports cannot drift apart.
  */
 
 import {
-  Document,
-  Packer,
-  Paragraph,
-  TextRun,
-  Table,
-  TableRow as DocxTableRow,
-  TableCell,
-  WidthType,
   AlignmentType,
   BorderStyle,
+  Document,
+  HeadingLevel,
+  Packer,
+  Paragraph,
   ShadingType,
+  Table,
+  TableCell,
+  TableRow as DocxTableRow,
+  TextRun,
+  VerticalAlign,
+  WidthType,
 } from "docx";
 import { saveAs } from "file-saver";
-import type { TableRow, InvoiceMeta } from "@/types/packing";
+import { fmtNum } from "@/services/extraction/numbers";
+import type { InvoiceMeta, TableRow } from "@/types/packing";
+import { BRAND, COLUMN_WIDTHS, COMPANY, ORIGIN_NOTE, VAT_NOTE } from "./nexoraPdfTheme";
+import { computeTotals, designation, groupByContainer } from "./packingGroups";
 
-const FONT = "Arial";
-const FONT_SM = 16; // 8pt in half-points
-const FONT_MD = 18; // 9pt
-const FONT_LG = 22; // 11pt
-const FONT_XL = 28; // 14pt
+const FONT = "Calibri";
+const SIZE_SM = 13; // half-points → 6.5pt
+const SIZE_MD = 15;
+const SIZE_LG = 18;
+const SIZE_TITLE = 26;
+const SIZE_BRAND = 30;
 
-const fmtNum = (n: number, d = 2) =>
-  n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+/** Usable width of an A4 landscape page with 1cm margins, in twips. */
+const PAGE_WIDTH = 14400;
 
-const NO_BORDER = {
-  top: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
-  bottom: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
-  left: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
-  right: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
-};
+const hex = (color: string) => color.replace("#", "");
 
-const THIN_BORDER = {
-  top: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-  bottom: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-  left: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-  right: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-};
+const NO_BORDERS = {
+  top: { style: BorderStyle.NIL },
+  bottom: { style: BorderStyle.NIL },
+  left: { style: BorderStyle.NIL },
+  right: { style: BorderStyle.NIL },
+  insideHorizontal: { style: BorderStyle.NIL },
+  insideVertical: { style: BorderStyle.NIL },
+} as const;
 
-const HEADER_SHADING = {
-  type: ShadingType.CLEAR,
-  fill: "CCCCCC",
-  color: "000000",
-};
+const HAIRLINE = {
+  top: { style: BorderStyle.SINGLE, size: 2, color: hex(BRAND.rule) },
+  bottom: { style: BorderStyle.SINGLE, size: 2, color: hex(BRAND.rule) },
+  left: { style: BorderStyle.SINGLE, size: 2, color: hex(BRAND.rule) },
+  right: { style: BorderStyle.SINGLE, size: 2, color: hex(BRAND.rule) },
+} as const;
 
-function txt(text: string, opts: { bold?: boolean; size?: number; font?: string } = {}) {
-  return new TextRun({ text, bold: opts.bold ?? false, size: opts.size ?? FONT_MD, font: opts.font ?? FONT });
+const PANEL_BORDER = {
+  top: { style: BorderStyle.SINGLE, size: 4, color: hex(BRAND.goldSoft) },
+  bottom: { style: BorderStyle.SINGLE, size: 4, color: hex(BRAND.goldSoft) },
+  left: { style: BorderStyle.SINGLE, size: 4, color: hex(BRAND.goldSoft) },
+  right: { style: BorderStyle.SINGLE, size: 4, color: hex(BRAND.goldSoft) },
+} as const;
+
+interface RunOptions {
+  bold?: boolean;
+  size?: number;
+  color?: string;
+  italics?: boolean;
+  spacing?: number;
 }
 
-function para(children: TextRun[], align: (typeof AlignmentType)[keyof typeof AlignmentType] = AlignmentType.LEFT, spacingBefore = 0, spacingAfter = 0) {
-  return new Paragraph({
-    children,
-    alignment: align,
-    spacing: { before: spacingBefore, after: spacingAfter },
+function run(text: string, options: RunOptions = {}): TextRun {
+  return new TextRun({
+    text,
+    font: FONT,
+    bold: options.bold ?? false,
+    italics: options.italics ?? false,
+    size: options.size ?? SIZE_MD,
+    color: hex(options.color ?? BRAND.ink),
+    characterSpacing: options.spacing,
   });
 }
 
-function emptyLine(spacing = 40) {
-  return new Paragraph({ children: [txt("")], spacing: { after: spacing } });
+function para(
+  children: TextRun[],
+  alignment: (typeof AlignmentType)[keyof typeof AlignmentType] = AlignmentType.LEFT
+): Paragraph {
+  return new Paragraph({ children, alignment, spacing: { before: 0, after: 0 } });
 }
 
-function cell(
-  children: Paragraph[],
-  opts: {
-    borders?: Record<string, { style: string; size?: number; color?: string }>;
-    width?: number;
-    shading?: typeof HEADER_SHADING;
-    colSpan?: number;
-  } = {}
-) {
+function spacer(after = 120): Paragraph {
+  return new Paragraph({ children: [run("")], spacing: { after } });
+}
+
+const dash = (value: string) => (value.trim() ? value.trim() : "-");
+
+/** Column widths in twips, taken from the model's proportions. */
+const W = Object.fromEntries(
+  Object.entries(COLUMN_WIDTHS).map(([key, share]) => [key, Math.round((share / 100) * PAGE_WIDTH)])
+) as Record<keyof typeof COLUMN_WIDTHS, number>;
+
+function headCell(text: string, width: number): TableCell {
   return new TableCell({
-    children,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    borders: (opts.borders ?? THIN_BORDER) as any,
-    width: opts.width ? { size: opts.width, type: WidthType.DXA } : undefined,
-    shading: opts.shading,
-    columnSpan: opts.colSpan,
+    width: { size: width, type: WidthType.DXA },
+    shading: { type: ShadingType.CLEAR, fill: hex(BRAND.ink), color: "auto" },
+    verticalAlign: VerticalAlign.CENTER,
+    borders: HAIRLINE,
+    children: [para([run(text, { bold: true, size: SIZE_SM, color: BRAND.white, spacing: 6 })], AlignmentType.CENTER)],
   });
 }
 
-function headerCell(text: string, width: number) {
-  return cell(
-    [para([txt(text, { bold: true, size: FONT_SM })], AlignmentType.CENTER)],
-    { borders: THIN_BORDER, width, shading: HEADER_SHADING }
-  );
+function bodyCell(
+  text: string,
+  width: number,
+  options: { bold?: boolean; fill?: string; color?: string; align?: (typeof AlignmentType)[keyof typeof AlignmentType]; rowSpan?: number } = {}
+): TableCell {
+  return new TableCell({
+    width: { size: width, type: WidthType.DXA },
+    shading: options.fill ? { type: ShadingType.CLEAR, fill: hex(options.fill), color: "auto" } : undefined,
+    verticalAlign: VerticalAlign.CENTER,
+    borders: HAIRLINE,
+    rowSpan: options.rowSpan,
+    children: [
+      para(
+        [run(text, { bold: options.bold, size: SIZE_SM, color: options.color })],
+        options.align ?? AlignmentType.CENTER
+      ),
+    ],
+  });
 }
 
-function dataCell(text: string, width: number, align: (typeof AlignmentType)[keyof typeof AlignmentType] = AlignmentType.CENTER) {
-  return cell(
-    [para([txt(text, { size: FONT_SM })], align)],
-    { borders: THIN_BORDER, width }
-  );
+function panelCell(title: string, lines: { text: string; bold?: boolean }[], width: number): TableCell {
+  return new TableCell({
+    width: { size: width, type: WidthType.DXA },
+    borders: PANEL_BORDER,
+    margins: { top: 80, bottom: 80, left: 120, right: 120 },
+    children: [
+      para([run(title, { bold: true, size: SIZE_SM, color: BRAND.gold, spacing: 12 })]),
+      ...lines.map((line) => para([run(line.text, { bold: line.bold, size: SIZE_MD })])),
+    ],
+  });
 }
 
-function totalCell(text: string, width: number) {
-  return cell(
-    [para([txt(text, { bold: true, size: FONT_SM })], AlignmentType.CENTER)],
-    { borders: THIN_BORDER, width }
-  );
+function stripCell(label: string, value: string, width: number): TableCell {
+  return new TableCell({
+    width: { size: width, type: WidthType.DXA },
+    borders: PANEL_BORDER,
+    shading: { type: ShadingType.CLEAR, fill: hex(BRAND.sand), color: "auto" },
+    margins: { top: 50, bottom: 50, left: 120, right: 120 },
+    children: [
+      para([
+        run(`${label}: `, { bold: true, size: SIZE_SM, color: BRAND.gold, spacing: 8 }),
+        run(dash(value), { size: SIZE_SM }),
+      ]),
+    ],
+  });
 }
 
-export async function exportPackingListDocx(
-  rows: TableRow[],
-  meta: InvoiceMeta
-): Promise<void> {
-  // ── Column widths (DXA / twips, A4 narrow margins total ≈ 10500 twips) ──
-  const W = {
-    fam: 420,
-    formato: 900,
-    modelo: 1000,
-    color: 750,
-    cal: 430,
-    tono: 600,
-    clbr: 380,
-    nro_palets: 590,
-    m2: 560,
-    piezas: 530,
-    cajas: 530,
-    peso_neto: 760,
-    peso_bruto: 820,
-  };
-  const totalW = Object.values(W).reduce((a, b) => a + b, 0);
+function summaryRow(label: string, value: string, alt: boolean): DocxTableRow {
+  const shading = alt ? { type: ShadingType.CLEAR, fill: hex(BRAND.cream), color: "auto" } : undefined;
+  return new DocxTableRow({
+    children: [
+      new TableCell({
+        width: { size: 4200, type: WidthType.DXA },
+        borders: NO_BORDERS,
+        shading,
+        children: [para([run(label, { size: SIZE_MD })])],
+      }),
+      new TableCell({
+        width: { size: 2400, type: WidthType.DXA },
+        borders: NO_BORDERS,
+        shading,
+        children: [para([run(value, { bold: true, size: SIZE_MD })], AlignmentType.RIGHT)],
+      }),
+    ],
+  });
+}
 
-  // ── Totals ──
-  const totalPalets = rows.reduce((s, r) => s + r.nro_palets, 0);
-  const totalM2 = rows.reduce((s, r) => s + r.m2, 0);
-  const totalPiezas = rows.reduce((s, r) => s + r.piezas, 0);
-  const totalCajas = rows.reduce((s, r) => s + r.cajas, 0);
-  const totalPesoNeto = rows.reduce((s, r) => s + r.peso_neto, 0);
-  const totalPesoBruto = rows.reduce((s, r) => s + r.peso_bruto, 0);
+export async function exportPackingListDocx(rows: TableRow[], meta: InvoiceMeta): Promise<void> {
+  const groups = groupByContainer(rows, meta);
+  const totals = computeTotals(rows, groups);
+  const declaredContainers = Number.parseInt(meta.total_contenedores, 10);
+  const containerCount = totals.contenedores || (Number.isFinite(declaredContainers) ? declaredContainers : 1);
 
-  // ── 1. Company header ──
-  const companyHeader = [
-    para([txt("Nexora Ceramica", { bold: true, size: FONT_LG })]),
-    para([txt("S.L  B24881047", { size: FONT_MD })]),
-    para([txt("AVENIDA DEL MEDITERRÁNEO, 87, NAVE 3, ONDA", { size: FONT_MD })]),
-    emptyLine(60),
+  // ── Brand header ──
+  const header = [
+    new Paragraph({
+      heading: HeadingLevel.HEADING_1,
+      spacing: { after: 0 },
+      children: [run(COMPANY.name, { bold: true, size: SIZE_BRAND, spacing: 12 })],
+    }),
+    para([run(COMPANY.suffix, { bold: true, size: SIZE_SM, color: BRAND.gold, spacing: 40 })]),
+    para([run(`${COMPANY.legalName} — NIF: ${COMPANY.nif}`, { size: SIZE_SM, color: BRAND.inkSoft })]),
+    para([run(`${COMPANY.street}, ${COMPANY.city}`, { size: SIZE_SM, color: BRAND.inkSoft })]),
+    para([run(COMPANY.email, { size: SIZE_SM, color: BRAND.inkSoft })]),
+    spacer(160),
   ];
 
-  // ── 2. Two-column layout: PACKING LIST (left) | COMPRADOR (right) ──
-  const leftChildren = [
-    para([txt("PACKING LIST", { bold: true, size: FONT_XL })], AlignmentType.LEFT, 0, 80),
-    para([txt("NUMERO FACTURA", { bold: true, size: FONT_MD }), txt("   " + (meta.invoice_reference || ""), { size: FONT_MD })]),
-    para([txt("FECHA FACTURA", { bold: true, size: FONT_MD }), txt("     " + (meta.invoice_date || ""), { size: FONT_MD })]),
-    para([txt("CLIENTE", { bold: true, size: FONT_MD }), txt("            " + (meta.client_name || ""), { size: FONT_MD })]),
-    para([txt("V.A.T", { bold: true, size: FONT_MD }), txt("               " + (meta.client_vat || ""), { size: FONT_MD })]),
-  ];
-
-  const rightChildren = [
-    para([txt("COMPRADOR - DESTINATARIO", { bold: true, size: FONT_MD })], AlignmentType.LEFT, 0, 40),
-    ...(meta.client_name || meta.client_address
-      ? (meta.client_name + (meta.client_address ? ", " + meta.client_address : ""))
-          .split(/,\s*/)
-          .map((line) => para([txt(line.trim(), { size: FONT_MD })]))
-      : [para([txt("", { size: FONT_MD })])]),
-  ];
-
-  const infoTable = new Table({
-    width: { size: totalW, type: WidthType.DXA },
-    borders: {
-      top: { style: BorderStyle.NIL },
-      bottom: { style: BorderStyle.NIL },
-      left: { style: BorderStyle.NIL },
-      right: { style: BorderStyle.NIL },
-      insideHorizontal: { style: BorderStyle.NIL },
-      insideVertical: { style: BorderStyle.NIL },
-    },
+  // ── Title band ──
+  const titleBand = new Table({
+    width: { size: PAGE_WIDTH, type: WidthType.DXA },
+    borders: NO_BORDERS,
     rows: [
       new DocxTableRow({
         children: [
-          cell(leftChildren, { borders: NO_BORDER, width: Math.round(totalW * 0.58) }),
-          cell(rightChildren, { borders: NO_BORDER, width: Math.round(totalW * 0.42) }),
+          new TableCell({
+            width: { size: PAGE_WIDTH, type: WidthType.DXA },
+            borders: NO_BORDERS,
+            shading: { type: ShadingType.CLEAR, fill: hex(BRAND.gold), color: "auto" },
+            margins: { top: 90, bottom: 90 },
+            children: [
+              para([run("PACKING LIST", { bold: true, size: SIZE_TITLE, color: BRAND.white, spacing: 80 })], AlignmentType.CENTER),
+            ],
+          }),
         ],
       }),
     ],
   });
 
-  // ── 3. Container info line ──
-  const containerParagraphs: Paragraph[] = [];
-  if (meta.contenedor || meta.precinto) {
-    containerParagraphs.push(
-      emptyLine(40),
-      para(
-        [
-          txt("CONTENEDOR", { bold: true, size: FONT_MD }),
-          txt("   " + (meta.contenedor || "") + "          ", { size: FONT_MD }),
-          txt("PRECINTO", { bold: true, size: FONT_MD }),
-          txt("   " + (meta.precinto || "") + "          ", { size: FONT_MD }),
-          txt("PESO NETO ", { bold: true, size: FONT_MD }),
-          txt(fmtNum(totalPesoNeto) + "   ", { size: FONT_MD }),
-          txt("PESO BRUTO ", { bold: true, size: FONT_MD }),
-          txt(fmtNum(totalPesoBruto), { size: FONT_MD }),
+  // ── Invoice · Buyer · Origin ──
+  const third = Math.round(PAGE_WIDTH / 3);
+  const panels = new Table({
+    width: { size: PAGE_WIDTH, type: WidthType.DXA },
+    borders: NO_BORDERS,
+    rows: [
+      new DocxTableRow({
+        children: [
+          panelCell(
+            "FACTURA / INVOICE",
+            [
+              { text: `Nº: ${dash(meta.invoice_reference)}`, bold: true },
+              { text: `Fecha: ${dash(meta.invoice_date)}`, bold: true },
+              ...(meta.supplier_name.trim() ? [{ text: `Proveedor: ${meta.supplier_name.trim()}` }] : []),
+            ],
+            third
+          ),
+          panelCell(
+            "CLIENTE / BUYER",
+            [
+              { text: dash(meta.client_name), bold: true },
+              ...(meta.client_address.trim() ? [{ text: meta.client_address.trim() }] : []),
+              ...(meta.client_vat.trim() ? [{ text: `VAT: ${meta.client_vat.trim()}` }] : []),
+            ],
+            third
+          ),
+          panelCell(
+            "ORIGEN DE LA MERCANCÍA",
+            meta.origen_mercancia
+              .split(/\s*—\s*|\n/)
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((text) => ({ text })),
+            PAGE_WIDTH - third * 2
+          ),
         ],
-        AlignmentType.LEFT
-      ),
-      emptyLine(40)
-    );
-  } else {
-    containerParagraphs.push(emptyLine(60));
-  }
-
-  // ── 4. Main data table ──
-  const tableHeaderRow = new DocxTableRow({
-    tableHeader: true,
-    children: [
-      headerCell("FAM", W.fam),
-      headerCell("FORMATO", W.formato),
-      headerCell("MODELO", W.modelo),
-      headerCell("COLOR", W.color),
-      headerCell("CAL", W.cal),
-      headerCell("TONO", W.tono),
-      headerCell("CLBR", W.clbr),
-      headerCell("NRO.PALETS", W.nro_palets),
-      headerCell("M2", W.m2),
-      headerCell("PIEZAS", W.piezas),
-      headerCell("CAJAS", W.cajas),
-      headerCell("PESO NETO", W.peso_neto),
-      headerCell("PESO BRUTO", W.peso_bruto),
+      }),
     ],
   });
 
-  const dataRows = rows.map(
-    (r) =>
+  // ── Reference strip ──
+  const strip = new Table({
+    width: { size: PAGE_WIDTH, type: WidthType.DXA },
+    borders: NO_BORDERS,
+    rows: [
       new DocxTableRow({
         children: [
-          dataCell(r.fam, W.fam),
-          dataCell(r.formato, W.formato, AlignmentType.LEFT),
-          dataCell(r.modelo, W.modelo, AlignmentType.LEFT),
-          dataCell(r.color, W.color, AlignmentType.LEFT),
-          dataCell(r.cal, W.cal),
-          dataCell(r.tono, W.tono),
-          dataCell(r.clbr, W.clbr),
-          dataCell(String(r.nro_palets), W.nro_palets),
-          dataCell(fmtNum(r.m2), W.m2),
-          dataCell(String(r.piezas), W.piezas),
-          dataCell(String(r.cajas), W.cajas),
-          dataCell(fmtNum(r.peso_neto), W.peso_neto),
-          dataCell(fmtNum(r.peso_bruto), W.peso_bruto),
+          stripCell("SU REFERENCIA", meta.su_referencia, third),
+          stripCell("FORMA DE PAGO", meta.forma_pago, third),
+          stripCell("ÚLTIMO TENEDOR", meta.ultimo_tenedor || meta.client_name, PAGE_WIDTH - third * 2),
         ],
-      })
-  );
+      }),
+    ],
+  });
+
+  // ── Item grid ──
+  const headerRow = new DocxTableRow({
+    tableHeader: true,
+    children: [
+      headCell("Nº", W.num),
+      headCell("CONTENEDOR", W.contenedor),
+      headCell("PRECINTO", W.precinto),
+      headCell("FORMATO", W.formato),
+      headCell("DESIGNACIÓN / MODELO", W.modelo),
+      headCell("CAL.", W.cal),
+      headCell("TONO", W.tono),
+      headCell("NRO. PALETS", W.palets),
+      headCell("CAJAS", W.cajas),
+      headCell("M2", W.m2),
+      headCell("PESO BRUTO (KG)", W.bruto),
+    ],
+  });
+
+  let itemIndex = 0;
+  const dataRows: DocxTableRow[] = [];
+  for (const group of groups) {
+    group.rows.forEach((row, rowIndex) => {
+      itemIndex += 1;
+      const zebra = itemIndex % 2 === 0 ? BRAND.tint : BRAND.white;
+      const first = rowIndex === 0;
+      const span = group.rows.length;
+
+      dataRows.push(
+        new DocxTableRow({
+          children: [
+            // A merged cell is declared on its first row and continued after.
+            ...(first
+              ? [
+                  bodyCell(String(group.index), W.num, { bold: true, fill: BRAND.cream, color: BRAND.gold, rowSpan: span }),
+                  bodyCell(dash(group.contenedor), W.contenedor, { bold: true, fill: BRAND.cream, rowSpan: span }),
+                  bodyCell(dash(group.precinto), W.precinto, { bold: true, fill: BRAND.cream, rowSpan: span }),
+                ]
+              : []),
+            bodyCell(row.formato, W.formato, { fill: zebra }),
+            bodyCell(designation(row), W.modelo, { fill: zebra, align: AlignmentType.LEFT }),
+            bodyCell(row.cal, W.cal, { fill: zebra }),
+            bodyCell(row.tono, W.tono, { fill: zebra }),
+            bodyCell(fmtNum(row.nro_palets), W.palets, { fill: zebra }),
+            bodyCell(fmtNum(row.cajas), W.cajas, { fill: zebra }),
+            bodyCell(fmtNum(row.m2), W.m2, { fill: zebra }),
+            ...(first
+              ? [bodyCell(fmtNum(group.pesoBruto), W.bruto, { bold: true, fill: BRAND.cream, rowSpan: span })]
+              : []),
+          ],
+        })
+      );
+    });
+  }
 
   const totalsRow = new DocxTableRow({
     children: [
-      totalCell("", W.fam),
-      totalCell("", W.formato),
-      totalCell("", W.modelo),
-      totalCell("", W.color),
-      totalCell("", W.cal),
-      totalCell("", W.tono),
-      totalCell("", W.clbr),
-      totalCell(String(totalPalets), W.nro_palets),
-      totalCell(fmtNum(totalM2), W.m2),
-      totalCell(String(totalPiezas), W.piezas),
-      totalCell(String(totalCajas), W.cajas),
-      totalCell(fmtNum(totalPesoNeto), W.peso_neto),
-      totalCell(fmtNum(totalPesoBruto), W.peso_bruto),
+      new TableCell({
+        width: {
+          size: W.num + W.contenedor + W.precinto + W.formato + W.modelo + W.cal + W.tono,
+          type: WidthType.DXA,
+        },
+        columnSpan: 7,
+        borders: HAIRLINE,
+        shading: { type: ShadingType.CLEAR, fill: hex(BRAND.sand), color: "auto" },
+        children: [para([run("TOTAL", { bold: true, size: SIZE_MD, spacing: 20 })], AlignmentType.CENTER)],
+      }),
+      bodyCell(fmtNum(totals.palets), W.palets, { bold: true, fill: BRAND.sand }),
+      bodyCell(fmtNum(totals.cajas), W.cajas, { bold: true, fill: BRAND.sand }),
+      bodyCell(fmtNum(totals.m2), W.m2, { bold: true, fill: BRAND.sand }),
+      bodyCell(fmtNum(totals.pesoBruto), W.bruto, { bold: true, fill: BRAND.sand }),
     ],
   });
 
-  const mainTable = new Table({
-    width: { size: totalW, type: WidthType.DXA },
-    rows: [tableHeaderRow, ...dataRows, totalsRow],
+  const grid = new Table({
+    width: { size: PAGE_WIDTH, type: WidthType.DXA },
+    rows: [headerRow, ...dataRows, totalsRow],
   });
 
-  // ── 5. Summary section ──
-  const summaryLines = [
-    emptyLine(60),
-    para([txt("PESO BRUTO (Kg)  ", { bold: true, size: FONT_MD }), txt(fmtNum(totalPesoBruto), { size: FONT_MD })]),
-    para([txt("PESO NETO (Kg)   ", { bold: true, size: FONT_MD }), txt(fmtNum(totalPesoNeto), { size: FONT_MD })]),
-    para([txt("TOTAL PALETS     ", { bold: true, size: FONT_MD }), txt(String(totalPalets), { size: FONT_MD })]),
-    para([
-      txt("TOTAL CONTENEDORES  ", { bold: true, size: FONT_MD }),
-      txt(meta.total_contenedores || "1", { size: FONT_MD }),
-    ]),
-  ];
+  // ── Shipment summary + customs ──
+  const summary = new Table({
+    width: { size: 6600, type: WidthType.DXA },
+    borders: NO_BORDERS,
+    rows: [
+      summaryRow("Nº Contenedores:", String(containerCount), false),
+      summaryRow("Total Palets:", fmtNum(totals.palets), true),
+      summaryRow("Total Cajas:", fmtNum(totals.cajas), false),
+      summaryRow("Total M2:", fmtNum(totals.m2), true),
+      ...(totals.piezas > 0 ? [summaryRow("Total Piezas:", fmtNum(totals.piezas, 0), false)] : []),
+      summaryRow("Peso Neto:", `${fmtNum(totals.pesoNeto)} Kg`, true),
+      summaryRow("Peso Bruto:", `${fmtNum(totals.pesoBruto)} Kg`, false),
+    ],
+  });
 
-  // ── 6. Family legend ──
-  const legendLines: Paragraph[] = [];
-  if (meta.familia_leyenda) {
-    legendLines.push(emptyLine(40));
-    meta.familia_leyenda.split("\n").filter(Boolean).forEach((line) => {
-      legendLines.push(para([txt(line.trim(), { size: FONT_MD })]));
-    });
-  }
+  const legend = meta.familia_leyenda.split("\n").map((l) => l.trim()).filter(Boolean);
+  const customs = new Table({
+    width: { size: 6600, type: WidthType.DXA },
+    borders: NO_BORDERS,
+    rows: [
+      summaryRow("Partida Arancelaria:", dash(meta.partida_arancelaria), false),
+      summaryRow("País de Origen:", dash(meta.pais_origen), true),
+      summaryRow("País de Destino:", dash(meta.pais_destino), false),
+      ...legend.map((line, i) => {
+        const [code, ...rest] = line.split(/\s+/);
+        return summaryRow(`Familia ${code}:`, rest.join(" "), i % 2 === 0);
+      }),
+    ],
+  });
 
-  // ── 7. Customs codes table ──
-  const ceeLines: Paragraph[] = [];
-  if (meta.codigo_cee) {
-    const ceeW = { code: 5200, m2: 900, pb: 1100, pn: 1100, pal: 900 };
-    const ceeTableW = Object.values(ceeW).reduce((a, b) => a + b, 0);
+  const summaryBlock = new Table({
+    width: { size: PAGE_WIDTH, type: WidthType.DXA },
+    borders: NO_BORDERS,
+    rows: [
+      new DocxTableRow({
+        children: [
+          new TableCell({
+            width: { size: Math.round(PAGE_WIDTH * 0.52), type: WidthType.DXA },
+            borders: NO_BORDERS,
+            children: [
+              para([run("RESUMEN DEL ENVÍO", { bold: true, size: SIZE_LG, color: BRAND.gold, spacing: 30 })]),
+              spacer(60),
+              summary,
+            ],
+          }),
+          new TableCell({
+            width: { size: Math.round(PAGE_WIDTH * 0.48), type: WidthType.DXA },
+            borders: NO_BORDERS,
+            children: [
+              para([run("CÓDIGO C.E.E.", { bold: true, size: SIZE_LG, color: BRAND.gold, spacing: 30 })]),
+              spacer(60),
+              customs,
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
 
-    const ceeTable = new Table({
-      width: { size: ceeTableW, type: WidthType.DXA },
-      rows: [
-        new DocxTableRow({
-          children: [
-            headerCell("CODIGO C.E.E.", ceeW.code),
-            headerCell("M2", ceeW.m2),
-            headerCell("PESO BRUTO", ceeW.pb),
-            headerCell("PESO NETO", ceeW.pn),
-            headerCell("PALETS", ceeW.pal),
-          ],
-        }),
-        new DocxTableRow({
-          children: [
-            dataCell(meta.codigo_cee, ceeW.code, AlignmentType.LEFT),
-            dataCell(fmtNum(totalM2), ceeW.m2),
-            dataCell(fmtNum(totalPesoBruto), ceeW.pb),
-            dataCell(fmtNum(totalPesoNeto), ceeW.pn),
-            dataCell(String(totalPalets), ceeW.pal),
-          ],
-        }),
-      ],
-    });
-
-    ceeLines.push(emptyLine(60), ceeTable as unknown as Paragraph);
-  }
-
-  // ── 8. VAT note ──
-  const vatNote = [
-    emptyLine(60),
-    para(
-      [
-        txt(
-          "Operacion exenta de IVA de conformidad al articulo 21 de la Ley 37/1992 del Impuesto sobre el valor Añadido",
-          { size: FONT_SM }
-        ),
-      ],
-      AlignmentType.LEFT
-    ),
-  ];
-
-  // ── 9. Footer ──
-  const footer = [
-    emptyLine(80),
-    para([txt("info@nexoraceramica.es", { size: FONT_SM })], AlignmentType.CENTER),
-    para([txt("Page   1/1", { size: FONT_SM })], AlignmentType.CENTER),
-  ];
-
-  // ── Assemble document ──
   const doc = new Document({
+    creator: COMPANY.legalName,
+    title: `Packing List ${meta.invoice_reference || ""}`.trim(),
+    description: "Packing List NEXORA CERAMICA S.L.",
     sections: [
       {
         properties: {
           page: {
-            margin: {
-              top: 720,
-              bottom: 720,
-              left: 720,
-              right: 720,
-            },
+            size: { orientation: "landscape" },
+            margin: { top: 567, bottom: 567, left: 567, right: 567 },
           },
         },
         children: [
-          ...companyHeader,
-          infoTable,
-          ...containerParagraphs,
-          mainTable,
-          ...summaryLines,
-          ...legendLines,
-          ...(ceeLines as Paragraph[]),
-          ...vatNote,
-          ...footer,
+          ...header,
+          titleBand,
+          spacer(120),
+          panels,
+          spacer(100),
+          strip,
+          spacer(160),
+          grid,
+          spacer(240),
+          summaryBlock,
+          spacer(200),
+          para([run(ORIGIN_NOTE, { bold: true, size: SIZE_MD, spacing: 16 })]),
+          spacer(80),
+          para([run(VAT_NOTE, { italics: true, size: SIZE_SM })]),
+          spacer(160),
+          para(
+            [
+              run(
+                `${COMPANY.legalName} — NIF: ${COMPANY.nif} — ${COMPANY.street}, ${COMPANY.city} — ${COMPANY.email}`,
+                { size: SIZE_SM, color: BRAND.inkSoft }
+              ),
+            ],
+            AlignmentType.CENTER
+          ),
         ],
       },
     ],
   });
 
   const blob = await Packer.toBlob(doc);
-  saveAs(blob, `PackingList_NEXORA_${meta.invoice_reference || "export"}.docx`);
+  const reference = (meta.invoice_reference || "export").replace(/[^\w.-]+/g, "_");
+  saveAs(blob, `PACKING_LIST_${reference}.docx`);
 }

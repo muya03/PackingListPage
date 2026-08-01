@@ -1,29 +1,79 @@
 import React, { useCallback, useRef, useState } from "react";
-import { Upload, FileText, X, Plus, ArrowUpDown, AlertTriangle } from "lucide-react";
-import type { PdfFile } from "@/services/openaiService";
+import { Upload, FileText, X, Plus, ArrowUpDown, AlertTriangle, ScanLine, FileSpreadsheet } from "lucide-react";
+import type { SourceDocument, SourceKind } from "@/services/extraction";
 
 interface UploadZoneProps {
-  onFilesChanged: (files: PdfFile[]) => void;
+  onFilesChanged: (files: SourceDocument[]) => void;
   disabled?: boolean;
 }
 
-const MAX_FILES = 2;
+const MAX_FILES = 3;
 const MAX_SIZE_MB = 20;
 
-export const FILE_ROLES = ["Factura Comercial", "Packing List"] as const;
+export const FILE_ROLES = ["Packing List", "Factura Comercial", "Documento adicional"] as const;
+
+const ACCEPTED = ".pdf,.docx,.txt,.csv,.png,.jpg,.jpeg,.webp";
+
+function detectKind(file: File): SourceKind | null {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".pdf")) return "pdf";
+  if (name.endsWith(".docx")) return "docx";
+  if (name.endsWith(".txt") || name.endsWith(".csv")) return "text";
+  if (/\.(png|jpe?g|webp)$/.test(name)) return "image";
+  if (file.type === "application/pdf") return "pdf";
+  if (file.type.startsWith("image/")) return "image";
+  return null;
+}
+
+const KIND_LABELS: Record<SourceKind, string> = {
+  pdf: "PDF",
+  docx: "Word",
+  text: "Texto",
+  image: "Imagen",
+};
 
 function defaultRole(index: number): string {
   return FILE_ROLES[index] ?? `Archivo ${index + 1}`;
 }
 
+function readFile(file: File, role: string, kind: SourceKind): Promise<SourceDocument> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`No se ha podido leer "${file.name}".`));
+    reader.onload = () => {
+      const bytes = reader.result as ArrayBuffer;
+      resolve({
+        filename: file.name,
+        role,
+        kind,
+        bytes,
+        // Only scans and photos ever need the base64 payload, but keeping it
+        // here means the AI fallback does not have to re-read the file.
+        base64: kind === "image" || kind === "pdf" ? toBase64(bytes) : "",
+      });
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function toBase64(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < view.length; i += chunk) {
+    binary += String.fromCharCode(...view.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
-  const [files, setFiles] = useState<PdfFile[]>([]);
+  const [files, setFiles] = useState<SourceDocument[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const notify = useCallback(
-    (updated: PdfFile[]) => {
+    (updated: SourceDocument[]) => {
       setFiles(updated);
       onFilesChanged(updated);
     },
@@ -31,7 +81,7 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
   );
 
   const processRawFiles = useCallback(
-    (rawFiles: File[], currentFiles: PdfFile[]) => {
+    async (rawFiles: File[], currentFiles: SourceDocument[]) => {
       setError(null);
       const remaining = MAX_FILES - currentFiles.length;
       if (remaining <= 0) {
@@ -39,10 +89,10 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
         return;
       }
 
-      const toAdd = Array.from(rawFiles).slice(0, remaining);
-      const invalidType = toAdd.find((f) => f.type !== "application/pdf");
-      if (invalidType) {
-        setError("Solo se aceptan archivos PDF.");
+      const toAdd = rawFiles.slice(0, remaining);
+      const unsupported = toAdd.find((f) => detectKind(f) === null);
+      if (unsupported) {
+        setError(`"${unsupported.name}": formato no admitido. Usa PDF, DOCX, TXT/CSV o una imagen.`);
         return;
       }
       const tooLarge = toAdd.find((f) => f.size > MAX_SIZE_MB * 1024 * 1024);
@@ -51,24 +101,16 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
         return;
       }
 
-      let processed = 0;
-      const newEntries: PdfFile[] = [];
-
-      toAdd.forEach((file) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const result = e.target?.result as string;
-          const base64 = result.split(",")[1];
-          const role = defaultRole(currentFiles.length + newEntries.length);
-          newEntries.push({ base64, filename: file.name, role });
-          processed++;
-          if (processed === toAdd.length) {
-            const merged = [...currentFiles, ...newEntries];
-            notify(merged);
-          }
-        };
-        reader.readAsDataURL(file);
-      });
+      try {
+        const entries = await Promise.all(
+          toAdd.map((file, i) =>
+            readFile(file, defaultRole(currentFiles.length + i), detectKind(file) as SourceKind)
+          )
+        );
+        notify([...currentFiles, ...entries]);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "No se han podido leer los archivos.");
+      }
     },
     [notify]
   );
@@ -78,7 +120,7 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
       e.preventDefault();
       setIsDragging(false);
       if (disabled) return;
-      processRawFiles(Array.from(e.dataTransfer.files), files);
+      void processRawFiles(Array.from(e.dataTransfer.files), files);
     },
     [disabled, files, processRawFiles]
   );
@@ -91,21 +133,17 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
   const handleDragLeave = () => setIsDragging(false);
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      processRawFiles(Array.from(e.target.files), files);
-    }
+    if (e.target.files) void processRawFiles(Array.from(e.target.files), files);
     e.target.value = "";
   };
 
   const removeFile = (index: number) => {
-    const updated = files.filter((_, i) => i !== index);
     setError(null);
-    notify(updated);
+    notify(files.filter((_, i) => i !== index));
   };
 
   const changeRole = (index: number, role: string) => {
-    const updated = files.map((f, i) => (i === index ? { ...f, role } : f));
-    notify(updated);
+    notify(files.map((f, i) => (i === index ? { ...f, role } : f)));
   };
 
   const swapFiles = () => {
@@ -118,12 +156,11 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
   };
 
   const openPicker = () => {
-    if (!disabled && files.length < MAX_FILES) {
-      inputRef.current?.click();
-    }
+    if (!disabled && files.length < MAX_FILES) inputRef.current?.click();
   };
 
   const canAddMore = files.length < MAX_FILES && !disabled;
+  const duplicateRoles = new Set(files.map((f) => f.role)).size !== files.length;
 
   return (
     <div className="space-y-2">
@@ -132,19 +169,23 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
           {files.map((f, i) => (
             <div
               key={f.filename + i}
-              className="flex items-start gap-3 rounded-lg border border-green-200 dark:border-green-800 bg-green-50/30 dark:bg-green-950/10 px-3 py-2"
+              className="flex items-start gap-3 border border-border bg-muted/20 px-3 py-2"
             >
-              <FileText className="w-4 h-4 text-green-600 shrink-0 mt-2" />
+              {f.kind === "image" ? (
+                <ScanLine className="w-4 h-4 shrink-0 mt-2" style={{ color: "hsl(38 57% 54%)" }} />
+              ) : f.kind === "docx" ? (
+                <FileSpreadsheet className="w-4 h-4 shrink-0 mt-2" style={{ color: "hsl(38 57% 54%)" }} />
+              ) : (
+                <FileText className="w-4 h-4 shrink-0 mt-2" style={{ color: "hsl(38 57% 54%)" }} />
+              )}
               <div className="flex-1 min-w-0 space-y-1.5">
                 {disabled ? (
-                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                    {f.role}
-                  </p>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{f.role}</p>
                 ) : (
                   <select
                     value={f.role}
                     onChange={(e) => changeRole(i, e.target.value)}
-                    className="text-xs font-semibold uppercase tracking-wide bg-transparent border border-border rounded px-1.5 py-0.5 text-muted-foreground hover:border-primary/60 focus:outline-none focus:border-primary cursor-pointer"
+                    className="text-xs font-semibold uppercase tracking-wide bg-transparent border border-border px-1.5 py-0.5 text-muted-foreground hover:border-foreground focus:outline-none focus:border-foreground cursor-pointer"
                     title="Cambiar rol del archivo"
                   >
                     {FILE_ROLES.map((r) => (
@@ -156,7 +197,13 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
                 )}
                 <p className="text-sm font-medium text-foreground truncate" title={f.filename}>
                   {f.filename}
+                  <span className="ml-2 text-xs text-muted-foreground">{KIND_LABELS[f.kind]}</span>
                 </p>
+                {f.kind === "image" && (
+                  <p className="text-xs text-muted-foreground">
+                    Una imagen no tiene texto: esta necesitará la lectura con IA.
+                  </p>
+                )}
               </div>
               {!disabled && (
                 <button
@@ -173,7 +220,7 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
           {files.length === 2 && !disabled && (
             <button
               onClick={swapFiles}
-              className="w-full flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground border border-dashed border-border hover:border-primary/60 rounded-lg py-1.5 transition-colors"
+              className="w-full flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground border border-dashed border-border hover:border-foreground py-1.5 transition-colors"
               title="Intercambiar los roles entre los dos archivos"
             >
               <ArrowUpDown className="w-3.5 h-3.5" />
@@ -181,12 +228,10 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
             </button>
           )}
 
-          {files.length === 2 && files[0].role === files[1].role && !disabled && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          {duplicateRoles && !disabled && (
+            <div className="flex items-start gap-2 border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-700">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              <span>
-                Ambos archivos tienen el mismo rol (<strong>{files[0].role}</strong>). Asigna un rol distinto a cada uno para que la IA pueda procesarlos correctamente.
-              </span>
+              <span>Hay archivos con el mismo rol. Asigna un rol distinto a cada uno.</span>
             </div>
           )}
         </div>
@@ -198,15 +243,15 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onClick={openPicker}
-          className={`
-            relative border-2 border-dashed rounded-xl p-6 text-center transition-all duration-200 cursor-pointer
-            ${isDragging ? "border-primary bg-primary/5 scale-[1.01]" : "border-border hover:border-primary/60 hover:bg-muted/30"}
-          `}
+          className={`relative border-2 border-dashed p-6 text-center transition-all duration-200 cursor-pointer ${
+            isDragging ? "bg-muted/50" : "border-border hover:border-foreground/40 hover:bg-muted/30"
+          }`}
+          style={isDragging ? { borderColor: "hsl(38 57% 54%)" } : undefined}
         >
           <input
             ref={inputRef}
             type="file"
-            accept="application/pdf"
+            accept={ACCEPTED}
             multiple
             className="hidden"
             onChange={handleFileInput}
@@ -214,23 +259,11 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
           />
           <div className="space-y-2">
             <div className="flex justify-center">
-              <div
-                className={`p-3 rounded-full transition-colors ${
-                  isDragging ? "bg-primary/20" : "bg-muted"
-                }`}
-              >
+              <div className="p-3 bg-muted transition-colors">
                 {files.length === 0 ? (
-                  <Upload
-                    className={`w-6 h-6 transition-colors ${
-                      isDragging ? "text-primary" : "text-muted-foreground"
-                    }`}
-                  />
+                  <Upload className="w-6 h-6 text-muted-foreground" />
                 ) : (
-                  <Plus
-                    className={`w-6 h-6 transition-colors ${
-                      isDragging ? "text-primary" : "text-muted-foreground"
-                    }`}
-                  />
+                  <Plus className="w-6 h-6 text-muted-foreground" />
                 )}
               </div>
             </div>
@@ -238,20 +271,16 @@ export function UploadZone({ onFilesChanged, disabled }: UploadZoneProps) {
               {files.length === 0 ? (
                 <>
                   <p className="font-semibold text-sm text-foreground">
-                    Arrastra tus PDFs aquí o haz clic para seleccionar
+                    Arrastra tus documentos aquí o haz clic para seleccionar
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Puedes subir hasta 2 PDFs · Factura + Packing List · Máximo {MAX_SIZE_MB} MB c/u
+                    PDF · Word · TXT/CSV · Imagen — hasta {MAX_FILES} archivos, máximo {MAX_SIZE_MB} MB c/u
                   </p>
                 </>
               ) : (
                 <>
-                  <p className="font-semibold text-sm text-foreground">
-                    Añadir {defaultRole(files.length)}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Solo archivos PDF · Máximo {MAX_SIZE_MB} MB
-                  </p>
+                  <p className="font-semibold text-sm text-foreground">Añadir {defaultRole(files.length)}</p>
+                  <p className="text-xs text-muted-foreground mt-1">PDF · Word · TXT/CSV · Imagen</p>
                 </>
               )}
             </div>

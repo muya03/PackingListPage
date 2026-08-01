@@ -21,8 +21,6 @@ export function SettingsPanel({ onApiKeyChange }: SettingsPanelProps) {
     if (stored) {
       setApiKey(stored);
       onApiKeyChange(stored);
-    } else {
-      setIsOpen(true);
     }
   }, []);
 
@@ -50,11 +48,11 @@ export function SettingsPanel({ onApiKeyChange }: SettingsPanelProps) {
     <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className={`p-1.5 rounded-lg ${stored ? "bg-green-100 dark:bg-green-900/30" : "bg-amber-100 dark:bg-amber-900/30"}`}>
-            <Key className={`w-4 h-4 ${stored ? "text-green-600" : "text-amber-600"}`} />
+          <div className={`p-1.5 rounded-lg ${stored ? "bg-green-100 dark:bg-green-900/30" : "bg-muted"}`}>
+            <Key className={`w-4 h-4 ${stored ? "text-green-600" : "text-muted-foreground"}`} />
           </div>
           <div>
-            <p className="text-sm font-semibold text-foreground">Clave de API OpenAI</p>
+            <p className="text-sm font-semibold text-foreground">Clave de API OpenAI (opcional)</p>
             {stored && !isOpen ? (
               <p className="text-xs text-muted-foreground flex items-center gap-1">
                 <CheckCircle className="w-3 h-3 text-green-500" />
@@ -62,8 +60,8 @@ export function SettingsPanel({ onApiKeyChange }: SettingsPanelProps) {
               </p>
             ) : (
               <p className="text-xs text-muted-foreground flex items-center gap-1">
-                <AlertCircle className="w-3 h-3 text-amber-500" />
-                Necesaria para procesar facturas
+                <AlertCircle className="w-3 h-3 text-muted-foreground" />
+                Solo para escaneos y verificación
               </p>
             )}
           </div>
@@ -116,7 +114,9 @@ export function SettingsPanel({ onApiKeyChange }: SettingsPanelProps) {
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            Tu clave se guarda únicamente en este navegador. Nunca se envía a ningún servidor externo excepto a OpenAI.
+            La extracción normal no usa IA: se hace en tu navegador leyendo el PDF o el Word. Esta clave solo se
+            necesita para leer fotos o escaneos sin texto y para el botón «Verificar con IA». Se guarda únicamente en
+            este navegador y no se envía a ningún servidor salvo a OpenAI.
           </p>
           <Button
             size="sm"
