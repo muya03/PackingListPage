@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Frontend build output (Vite). The dist/ folders of lib/* and api-server are
+# committed on purpose — only this one is generated on every build.
+artifacts/nexora-app/dist/
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Editor / OS noise
+.DS_Store
+*.log
