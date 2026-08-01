@@ -229,6 +229,13 @@ Crea un archivo `.htaccess` en la raíz del dominio o subdominio con:
 ```apache
 Options -MultiViews
 RewriteEngine On
+
+# Un archivo que falte dentro de assets/ tiene que dar 404, no index.html.
+# Sin esta línea, si assets/ no se ha subido el servidor devuelve el HTML en
+# lugar del JavaScript y el navegador se queda en blanco sin decir por qué.
+RewriteCond %{REQUEST_URI} ^/assets/
+RewriteRule ^ - [L]
+
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^ index.html [QSA,L]
 

@@ -11,6 +11,86 @@
   </head>
   <body>
     <div id="root"></div>
+
+    <!--
+      Shown only when the application never boots: a static host that is missing
+      the assets/ folder would otherwise leave a blank white page with nothing to
+      go on. main.tsx removes this the moment React mounts, and the delayed fade
+      means a healthy load never flashes it.
+    -->
+    <div id="boot-fallback">
+      <div class="boot-card">
+        <p class="boot-brand">NEXORA</p>
+        <h1>No se ha podido cargar la aplicación</h1>
+        <p>
+          La página se ha servido, pero sus archivos JavaScript y CSS no. Casi siempre es que la
+          carpeta <code>assets/</code> no se subió al hosting, o quedó un nivel de más.
+        </p>
+        <p>En la raíz del dominio tiene que haber exactamente esto:</p>
+        <pre>index.html
+assets/
+  index-XXXXXXXX.js
+  index-XXXXXXXX.css
+  pdf.worker.min-XXXXXXXX.mjs</pre>
+        <p class="boot-hint">
+          Abre la consola del navegador (⌥⌘I) y mira la pestaña Red: los archivos en rojo son los
+          que faltan. Los detalles están en <code>DESPLIEGUE.md</code>.
+        </p>
+      </div>
+    </div>
+
+    <style>
+      /* Inline on purpose: the stylesheet is one of the things that may be missing. */
+      #boot-fallback {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #f8f6f2;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        color: #1a1918;
+        opacity: 0;
+        animation: boot-fallback-in 0s linear 3s forwards;
+      }
+      @keyframes boot-fallback-in {
+        to { opacity: 1; }
+      }
+      #boot-fallback .boot-card {
+        max-width: 560px;
+        background: #fff;
+        border: 1px solid #e3ded6;
+        border-top: 3px solid #b8935a;
+        padding: 32px;
+      }
+      #boot-fallback .boot-brand {
+        margin: 0 0 20px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.25em;
+        color: #b8935a;
+      }
+      #boot-fallback h1 { margin: 0 0 16px; font-size: 19px; font-weight: 600; }
+      #boot-fallback p { margin: 0 0 12px; font-size: 14px; line-height: 1.6; }
+      #boot-fallback code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        background: #f0ede9;
+        padding: 1px 5px;
+      }
+      #boot-fallback pre {
+        margin: 0 0 16px;
+        padding: 14px 16px;
+        background: #f0ede9;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        line-height: 1.5;
+        overflow-x: auto;
+      }
+      #boot-fallback .boot-hint { margin-bottom: 0; color: #6b665f; font-size: 13px; }
+    </style>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
