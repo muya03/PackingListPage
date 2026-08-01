@@ -22,7 +22,7 @@ Sin clave de OpenAI la aplicación funciona de principio a fin con documentos di
 - [Requisitos previos](#requisitos-previos)
 - [Instalación y ejecución local](#instalación-y-ejecución-local)
 - [Build de producción](#build-de-producción)
-- [Despliegue en Hostinger](#despliegue-en-hostinger)
+- [Despliegue](#despliegue)
 - [Variables de entorno](#variables-de-entorno)
 - [Problemas conocidos y soluciones](#problemas-conocidos-y-soluciones)
 
@@ -138,7 +138,7 @@ Todo el trabajo normal ocurre en `artifacts/nexora-app/src/services/extraction/`
 
 ## Requisitos previos
 
-- **Node.js v24** exactamente (recomendado: usar [nvm](https://github.com/nvm-sh/nvm) para gestionar versiones)
+- **Node.js 24** — el repositorio incluye un `.nvmrc`, así que con [nvm](https://github.com/nvm-sh/nvm) basta con `nvm install && nvm use` dentro de la carpeta del proyecto
 - **pnpm** como gestor de paquetes (el repositorio lo impone y bloquea npm/yarn)
 - **Git**
 
@@ -147,9 +147,12 @@ Todo el trabajo normal ocurre en `artifacts/nexora-app/src/services/extraction/`
 npm install -g pnpm
 
 # Verificar versiones
-node --version   # debe ser v24.x.x
-pnpm --version
+node --version          # v24.x.x
+pnpm --version          # 10.x
+node -p "process.arch"  # en un Mac M1/M2/M3 debe decir: arm64
 ```
+
+El proyecto funciona de forma nativa en **macOS Apple Silicon, macOS Intel, Linux y Windows**: el `pnpm-lock.yaml` incluye los binarios nativos de todas las plataformas y pnpm instala los que correspondan a la tuya.
 
 > ⚠️ El backend (`api-server`) requiere además una instancia de **PostgreSQL** accesible. Para desarrollo local puedes usar [Neon](https://neon.tech) o [Supabase](https://supabase.com) (ambos tienen tier gratuito).
 
@@ -164,59 +167,28 @@ git clone https://github.com/muya03/PackingListPage.git
 cd PackingListPage
 ```
 
-### 2. Eliminar binarios de plataforma bloqueados (solo la primera vez)
-
-El `pnpm-workspace.yaml` original fue generado en un entorno Linux x64 e incluye overrides que excluyen los binarios nativos de macOS (`darwin-arm64`, `darwin-x64`) y otros sistemas. Si trabajas en **Mac con Apple Silicon (M1/M2/M3/M4)**, debes eliminar esas líneas del bloque `overrides` en `pnpm-workspace.yaml` antes de instalar:
-
-Líneas a eliminar (todas las que contengan `darwin`):
-```yaml
-# Eliminar estas líneas del bloque overrides:
-rollup>@rollup/rollup-darwin-arm64: '-'
-rollup>@rollup/rollup-darwin-x64: '-'
-'@tailwindcss/oxide>@tailwindcss/oxide-darwin-arm64': '-'
-'@tailwindcss/oxide>@tailwindcss/oxide-darwin-x64': '-'
-lightningcss>lightningcss-darwin-arm64: '-'
-lightningcss>lightningcss-darwin-x64: '-'
-esbuild>@esbuild/darwin-arm64: '-'
-esbuild>@esbuild/darwin-x64: '-'
-```
-
-Si trabajas en **Windows** elimina los `win32`, y en **Linux x64** no necesitas tocar nada.
-
-### 3. Instalar dependencias
+### 2. Instalar dependencias
 
 ```bash
+nvm use          # opcional: usa la versión de .nvmrc
 pnpm install
 ```
 
-### 4. Configurar variables de entorno del frontend
+No hay que editar ningún archivo antes de instalar. En versiones anteriores el `pnpm-workspace.yaml` bloqueaba todos los binarios nativos que no fueran de Linux x64 y había que borrar a mano las líneas con `darwin`; eso ya está corregido.
 
-El `vite.config.ts` del frontend requiere `PORT` y `BASE_PATH`. La forma más sencilla es modificar el archivo para que use valores por defecto:
-
-Abre `artifacts/nexora-app/vite.config.ts` y reemplaza las validaciones estrictas del inicio:
-
-```typescript
-// Antes (lanza error si no se proporcionan):
-const rawPort = process.env.PORT;
-if (!rawPort) { throw new Error(...) }
-const port = Number(rawPort);
-const basePath = process.env.BASE_PATH;
-if (!basePath) { throw new Error(...) }
-
-// Después (usa valores por defecto):
-const port = Number(process.env.PORT ?? "3000");
-const basePath = process.env.BASE_PATH ?? "/";
-```
-
-### 5. Arrancar el frontend
+### 3. Arrancar el frontend
 
 ```bash
 pnpm --filter @workspace/nexora-app run dev
 ```
 
-La app estará disponible en `http://localhost:3000`.
+La app estará disponible en `http://localhost:3000`. `PORT` y `BASE_PATH` son opcionales y solo hacen falta si quieres otro puerto o servir desde una subcarpeta:
 
-### 6. Arrancar el backend (opcional)
+```bash
+PORT=4000 BASE_PATH=/packinglist/ pnpm --filter @workspace/nexora-app run dev
+```
+
+### 4. Arrancar el backend (opcional)
 
 Solo necesario si quieres usar la funcionalidad de guardar y recuperar sesiones:
 
@@ -245,59 +217,32 @@ Los archivos estáticos se generan en:
 artifacts/nexora-app/dist/public/
 ├── index.html
 └── assets/
-    ├── index-XXXXXX.js
-    ├── index-XXXXXX.css
-    └── ...
+    ├── index-XXXXXXXX.js           ← la aplicación
+    ├── index-XXXXXXXX.css          ← los estilos
+    └── pdf.worker.min-XXXXXXXX.mjs ← el lector de PDF (obligatorio)
 ```
 
 > Estos son los únicos archivos que hay que subir al hosting.
+>
+> ⚠️ El `pdf.worker.min-*.mjs` es el que lee los PDF sin IA. Si no se sube, la app carga pero no extrae nada. Sube siempre la carpeta `assets/` entera.
 
 ---
 
-## Despliegue en Hostinger (subdominio)
+## Despliegue
 
-### Paso 1 — Acceder al File Manager
+La guía completa está en **[DESPLIEGUE.md](./DESPLIEGUE.md)**: preparación de un Mac con Apple Silicon, build, subida a Hostinger (u otro hosting estático), backend opcional y resolución de problemas.
 
-En el panel de Hostinger (hPanel) → **Hosting** → tu plan → **File Manager**.
-
-### Paso 2 — Localizar la carpeta del subdominio
-
-Los subdominios tienen su propia carpeta dentro de `public_html/`:
-
-```
-public_html/
-  tusubdominio.tudominio.com/   ← entra aquí
-```
-
-Borra el contenido existente (suele haber un `index.html` de placeholder).
-
-### Paso 3 — Subir los archivos
-
-Sube el **contenido** de `artifacts/nexora-app/dist/public/` (no la carpeta `dist/` ni `public/` en sí, sino lo que hay dentro: `index.html` y la carpeta `assets/`).
-
-Puedes hacerlo por:
-
-- **File Manager de Hostinger** → botón Upload → selecciona todos los archivos.
-- **FTP con FileZilla** → más rápido para muchos archivos. Datos de conexión en hPanel → FTP Accounts.
-
-### Paso 4 — Crear el archivo `.htaccess`
-
-**Este paso es obligatorio.** Sin él, cualquier recarga de página o acceso directo a una ruta dará error 404, porque el servidor buscará archivos físicos que no existen (todo lo gestiona el router de React en el cliente).
-
-Crea un archivo llamado `.htaccess` en la raíz del subdominio con este contenido:
+En resumen: la aplicación es una SPA estática, así que basta con subir el contenido de `artifacts/nexora-app/dist/public/` a cualquier hosting de archivos estáticos y añadir un `.htaccess` que redirija todo a `index.html`:
 
 ```apache
 Options -MultiViews
 RewriteEngine On
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^ index.html [QSA,L]
+
+# El worker de pdf.js debe servirse como módulo JavaScript
+AddType text/javascript .mjs
 ```
-
-En el File Manager de Hostinger: botón **New File** → nombre `.htaccess` → pega el contenido → guardar.
-
-### Paso 5 — Verificar
-
-Abre `https://tusubdominio.tudominio.com` en el navegador. La app debería cargar correctamente.
 
 ---
 
@@ -305,11 +250,14 @@ Abre `https://tusubdominio.tudominio.com` en el navegador. La app debería carga
 
 ### Frontend (`artifacts/nexora-app`)
 
-| Variable | Valor local | Valor producción | Descripción |
-|---|---|---|---|
-| `PORT` | `3000` | No aplica (lo gestiona el hosting) | Puerto del dev server |
-| `BASE_PATH` | `/` | `/` | Ruta base de la app |
-| `VITE_API_URL` | `http://localhost:8080` | `https://tuapi.tudominio.com` | URL del api-server (solo si usas sesiones) |
+Ambas son **opcionales**; sin ellas se usan los valores por defecto.
+
+| Variable | Por defecto | Descripción |
+|---|---|---|
+| `PORT` | `3000` | Puerto del dev server y del `preview` |
+| `BASE_PATH` | `/` | Ruta base de la app. Cámbiala solo si se sirve desde una subcarpeta, p. ej. `/packinglist/` |
+
+> El frontend llama al `api-server` en `/api` **de su mismo origen**; no hay ninguna variable para apuntar a otro host. Si alojas el backend en otro sitio, necesitarás un proxy inverso (o cambiar `API_BASE` en `src/components/SessionsPanel.tsx`).
 
 ### Backend (`artifacts/api-server`)
 
@@ -319,39 +267,33 @@ Abre `https://tusubdominio.tudominio.com` en el navegador. La app debería carga
 | `PORT` | Puerto del servidor (por defecto 8080) |
 | `NODE_ENV` | `development` o `production` |
 
-> La **clave API de OpenAI** no se configura en el servidor — la introduce cada usuario en la interfaz de la app y se guarda en su propio `localStorage`.
+> La **clave API de OpenAI** no se configura en el servidor ni en el build — es opcional y la introduce cada usuario en la interfaz de la app, que la guarda en su propio `localStorage`.
 
 ---
 
 ## Problemas conocidos y soluciones
 
-### 1. Error: `Cannot find module @rollup/rollup-darwin-arm64`
+### 1. Error: `Cannot find module @rollup/rollup-darwin-arm64` (o `lightningcss-darwin-arm64`, `@esbuild/darwin-arm64`…)
 
-**Causa:** el `pnpm-workspace.yaml` excluye los binarios nativos de macOS porque fue generado en Linux x64.
+**Causa:** un `pnpm-lock.yaml` antiguo, de cuando el repositorio bloqueaba todos los binarios nativos que no fueran de Linux x64.
 
-**Solución:** eliminar las líneas con `darwin` del bloque `overrides` en `pnpm-workspace.yaml`, borrar `node_modules` y `pnpm-lock.yaml`, y reinstalar.
+**Solución:** actualiza y reinstala desde cero.
 
 ```bash
-rm -rf node_modules pnpm-lock.yaml
+git pull
+rm -rf node_modules artifacts/*/node_modules lib/*/node_modules scripts/node_modules
 pnpm install
 ```
+
+Si además `node -p "process.arch"` dice `x64` en un Mac con Apple Silicon, tu terminal corre bajo Rosetta y Node ha instalado los binarios de Intel — ver [DESPLIEGUE.md](./DESPLIEGUE.md#9-problemas-frecuentes-en-apple-silicon).
 
 ---
 
 ### 2. Error: `PORT environment variable is required but was not provided`
 
-**Causa:** el `vite.config.ts` original lanza excepciones si no se pasan `PORT` y `BASE_PATH` como variables de entorno del proceso. Vite no carga el `.env` para variables sin prefijo `VITE_`.
+**Causa:** una versión antigua del `vite.config.ts`, que exigía `PORT` y `BASE_PATH` como variables de proceso.
 
-**Solución A (recomendada):** modificar `vite.config.ts` para usar valores por defecto:
-```typescript
-const port = Number(process.env.PORT ?? "3000");
-const basePath = process.env.BASE_PATH ?? "/";
-```
-
-**Solución B (temporal):** pasar las variables inline:
-```bash
-PORT=3000 BASE_PATH=/ pnpm --filter @workspace/nexora-app run dev
-```
+**Solución:** actualiza el repositorio (`git pull`). En la versión actual ambas son opcionales, con `3000` y `/` por defecto.
 
 ---
 
@@ -398,7 +340,11 @@ La librería `docx` en versión 9 o superior usa ESM puro. Si el build de Vite f
 
 ## Arquitectura de decisiones clave
 
-- **IA 100% client-side:** las llamadas a OpenAI se hacen desde el navegador con la clave del usuario. No hay proxy de backend, no hay coste de servidor para la IA.
-- **Structured Outputs:** se usa `response_format: { type: "json_schema" }` de OpenAI para garantizar respuestas JSON deterministas.
-- **Lógica de negocio duplicada intencionalmente:** el prompt de IA y `calculationsService.ts` aplican las mismas reglas de conversión. Esto asegura consistencia cuando el usuario edita celdas manualmente tras la extracción.
-- **Backend opcional:** la app es completamente funcional sin el `api-server`. Las sesiones son la única funcionalidad que lo requiere.
+- **Determinista primero, IA al final:** la ruta normal es lectura offline del documento en el navegador. Al modelo solo se llega si el archivo no tiene capa de texto, si no se reconoce ninguna tabla, o si el operario pide una verificación.
+- **El encabezado manda:** `fields.ts` guarda el diccionario de sinónimos ES/EN/IT; una vez reconocido un encabezado, su rango de x pasa a ser una banda y todo lo que cae debajo es dato. Los encabezados que no usamos también reservan banda, para que sus valores no contaminen la columna vecina.
+- **Las celdas combinadas son geometría, no adivinanza:** una celda de contenedor que abarca k líneas se imprime en su punto medio, así que su posición codifica cuántas abarca. `buildRows.ts` resuelve esa recurrencia en vez de emparejar por cercanía, que se equivoca justo en los bordes de bloque.
+- **Vacío no es cero:** `parseNumber` devuelve `null` para una celda en blanco y `0` para un cero impreso. Una columna que el documento trae nunca se recalcula; solo se aplican las fórmulas cerámicas a las que faltan del todo, y la app informa de cuáles.
+- **Se valida sola:** `validate.ts` compara las sumas con los totales que el propio documento imprime. Que cuadren es la señal de que no hace falta IA; que no cuadren se reporta por columna y baja la fiabilidad.
+- **Un modelo, dos renderizadores:** `nexoraPdfTheme.ts` y `packingGroups.ts` los comparten el exportador de PDF y el de DOCX, así que no pueden divergir. Todos los anchos son proporción de página: vertical y horizontal son el mismo documento reflowado.
+- **IA 100% client-side:** cuando se usa, la llamada a OpenAI va del navegador del usuario con su propia clave. No hay proxy de backend ni coste de servidor.
+- **Backend opcional:** la app es completamente funcional sin el `api-server`. Las sesiones guardadas son lo único que lo requiere.
